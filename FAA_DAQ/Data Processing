@@ -1,0 +1,110 @@
+import nidaqmx
+from nidaqmx.constants import (BridgeConfiguration, 
+                                ExcitationSource, 
+                                StrainGageBridgeType)
+import numpy as np
+import pandas as pd
+from datetime import datetime
+
+# ─── CONFIGURATION ────────────────────────────────────────────
+DEVICE_NAME = "Dev1"          # Change this to your device name from NI MAX
+SAMPLE_RATE = 1000            # Samples per second
+SAMPLES_PER_READ = 100        # How many samples to read each loop
+
+# ─── VOLTAGE FORMULA ──────────────────────────────────────────
+def process_voltage(raw_voltage):
+    """
+    Edit this formula based on your specific needs
+    Example: convert raw voltage to engineering units
+    """
+    processed = raw_voltage * 2.5   # Replace with your actual formula
+    return processed
+
+# ─── MAIN ACQUISITION LOOP ────────────────────────────────────
+def run_acquisition():
+    with nidaqmx.Task() as strain_task, \
+         nidaqmx.Task() as disp_task, \
+         nidaqmx.Task() as volt_task:
+
+        # -- Strain channels (NI-9235, 8 channels) --
+        for ch in range(8):
+            strain_task.ai_channels.add_ai_strain_gage_chan(
+                f"{DEVICE_NAME}/ai{ch}",
+                gage_factor=2.0,              # Update with your gauge factor
+                initial_bridge_voltage=0.0,
+                strain_config=StrainGageBridgeType.QUARTER_BRIDGE_I,
+                voltage_excit_source=ExcitationSource.INTERNAL,
+                voltage_excit_val=2.5,
+                nominal_gage_resistance=120.0  # 120 ohm as per your hardware
+            )
+
+        # -- Displacement channels (NI-9205, 12 channels) --
+        for ch in range(12):
+            disp_task.ai_channels.add_ai_voltage_chan(
+                f"{DEVICE_NAME}/ai{ch+8}",    # Adjust channel numbers as needed
+                min_val=-10.0,
+                max_val=10.0
+            )
+
+        # -- Voltage channels (NI-9205, 4 channels) --
+        for ch in range(4):
+            volt_task.ai_channels.add_ai_voltage_chan(
+                f"{DEVICE_NAME}/ai{ch+20}",   # Adjust channel numbers as needed
+                min_val=-10.0,
+                max_val=10.0
+            )
+
+        # -- Set sample rates --
+        strain_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+        disp_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+        volt_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+
+        print("Acquisition started... Press Ctrl+C to stop")
+
+        all_data = []  # To store all readings
+
+        try:
+            while True:
+                # Read all channels
+                strain_data = strain_task.read(
+                    number_of_samples_per_channel=SAMPLES_PER_READ)
+                disp_data = disp_task.read(
+                    number_of_samples_per_channel=SAMPLES_PER_READ)
+                volt_data = volt_task.read(
+                    number_of_samples_per_channel=SAMPLES_PER_READ)
+
+                # Process voltage using your formula
+                volt_data_np = np.array(volt_data)
+                processed_volt = process_voltage(volt_data_np)
+
+                # Print real-time summary
+                print(f"\n[{datetime.now().strftime('%H:%M:%S')}]")
+                print(f"Strain (avg per ch):      {[round(np.mean(ch), 6) for ch in strain_data]}")
+                print(f"Displacement (avg per ch): {[round(np.mean(ch), 4) for ch in disp_data]}")
+                print(f"Voltage raw (avg per ch):  {[round(np.mean(ch), 4) for ch in volt_data]}")
+                print(f"Voltage processed:         {[round(np.mean(ch), 4) for ch in processed_volt]}")
+
+                # Save to dataframe
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+                row = {"timestamp": timestamp}
+                for i, ch in enumerate(strain_data):
+                    row[f"strain_ch{i+1}"] = np.mean(ch)
+                for i, ch in enumerate(disp_data):
+                    row[f"disp_ch{i+1}"] = np.mean(ch)
+                for i, ch in enumerate(volt_data):
+                    row[f"volt_raw_ch{i+1}"] = np.mean(ch)
+                for i, ch in enumerate(processed_volt):
+                    row[f"volt_processed_ch{i+1}"] = np.mean(ch)
+                all_data.append(row)
+
+        except KeyboardInterrupt:
+            print("\nAcquisition stopped.")
+            # Save to CSV
+            df = pd.DataFrame(all_data)
+            filename = f"data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            df.to_csv(filename, index=False)
+            print(f"Data saved to {filename}")
+
+# ─── RUN ──────────────────────────────────────────────────────
+if __name__ == "__main__":
+    run_acquisition()
