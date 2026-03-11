@@ -2,34 +2,37 @@ import nidaqmx
 from nidaqmx.constants import (BridgeConfiguration, 
                                 ExcitationSource, 
                                 StrainGageBridgeType)
-import numpy as np
-import pandas as pd
 from datetime import datetime
 
 # ─── CONFIGURATION ────────────────────────────────────────────
-DEVICE_NAME = "Dev1"          # Change this to your device name from NI MAX
-SAMPLE_RATE = 1000            # Samples per second
-SAMPLES_PER_READ = 100        # How many samples to read each loop
+VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
+STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
+SAMPLE_RATE    = 10           # Samples per second
+SAMPLES_PER_READ = 10         # How many samples to read each loop
 
-# ─── VOLTAGE FORMULA ──────────────────────────────────────────
-def process_voltage(raw_voltage):
-    """
-    Edit this formula based on your specific needs
-    Example: convert raw voltage to engineering units
-    """
-    processed = raw_voltage * 2.5   # Replace with your actual formula
-    return processed
+# ─── PRESSURE CONVERSION FORMULAS (one per channel) ──────────
+def process_soil_plate_pressure(raw):
+    return -2.86e-5 * raw**2 + 1.0038 * raw + 0.9331
+
+def process_agg_plate_pressure(raw):
+    return -1.34e-4 * raw**2 + 2.5171 * raw - 1.3375
+
+def process_soil_pore_water_pressure(raw):
+    return -2.79e-5 * raw**2 + 1.0006 * raw + 0.4014
+
+def process_agg_pore_water_pressure(raw):
+    return -2.93e-5 * raw**2 + 1.0073 * raw + 0.9260
 
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
     with nidaqmx.Task() as strain_task, \
          nidaqmx.Task() as disp_task, \
-         nidaqmx.Task() as volt_task:
+         nidaqmx.Task() as pressure_task:
 
-        # -- Strain channels (NI-9235, 8 channels) --
+        # -- Strain channels (NI-9235, Slot 2, 8 channels) --
         for ch in range(8):
             strain_task.ai_channels.add_ai_strain_gage_chan(
-                f"{DEVICE_NAME}/ai{ch}",
+                f"{STRAIN_MODULE}/ai{ch}",
                 gage_factor=2.0,              # Update with your gauge factor
                 initial_bridge_voltage=0.0,
                 strain_config=StrainGageBridgeType.QUARTER_BRIDGE_I,
@@ -38,18 +41,18 @@ def run_acquisition():
                 nominal_gage_resistance=120.0  # 120 ohm as per your hardware
             )
 
-        # -- Displacement channels (NI-9205, 12 channels) --
+        # -- Displacement channels (NI-9205, Slot 1, ch0 to ch11) --
         for ch in range(12):
             disp_task.ai_channels.add_ai_voltage_chan(
-                f"{DEVICE_NAME}/ai{ch+8}",    # Adjust channel numbers as needed
+                f"{VOLTAGE_MODULE}/ai{ch}",
                 min_val=-10.0,
                 max_val=10.0
             )
 
-        # -- Voltage channels (NI-9205, 4 channels) --
-        for ch in range(4):
-            volt_task.ai_channels.add_ai_voltage_chan(
-                f"{DEVICE_NAME}/ai{ch+20}",   # Adjust channel numbers as needed
+        # -- Pressure channels (NI-9205, Slot 1, ch17 to ch20) --
+        for ch in [17, 18, 19, 20]:
+            pressure_task.ai_channels.add_ai_voltage_chan(
+                f"{VOLTAGE_MODULE}/ai{ch}",
                 min_val=-10.0,
                 max_val=10.0
             )
@@ -57,11 +60,49 @@ def run_acquisition():
         # -- Set sample rates --
         strain_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
         disp_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
-        volt_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+        pressure_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
 
         print("Acquisition started... Press Ctrl+C to stop")
 
-        all_data = []  # To store all readings
+        # Tare baselines (set on first read)
+        baseline_strain = None
+        baseline_disp   = None
+        baseline_volt   = None   # [ch17, ch18, ch19, ch20] processed
+
+        # Open raw and processed text files, write headers
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        raw_filename  = f"data_raw_{ts}.txt"
+        proc_filename = f"data_processed_{ts}.txt"
+        raw_file  = open(raw_filename,  'w')
+        proc_file = open(proc_filename, 'w')
+
+        strain_names = [
+            "SG_2E_top", "SG_3E_top", "SG_4E_top", "SG_4E_bot",
+            "SG_5E_top", "SG_5E_bot", "SG_6E_top", "SG_7E_top"
+        ]
+        disp_names = [
+            "DCDT_Right_Slab_A1", "DCDT_Right_Slab_A2", "DCDT_Right_Slab_A3",
+            "DCDT_Right_Slab_B1", "DCDT_Right_Slab_B3",
+            "DCDT_Left_Slab_B1",  "DCDT_Left_Slab_B2_Bot", "DCDT_Left_Slab_B3",
+            "DCDT_Left_Slab_C1",  "DCDT_Left_Slab_C2", "DCDT_Left_Slab_C3",
+            "DCDT_Beam_B2_Top"
+        ]
+
+        raw_header = (
+            ["time"] +
+            strain_names +
+            disp_names +
+            ["volt_ch17", "volt_ch18", "volt_ch19", "volt_ch20"]
+        )
+        proc_header = (
+            ["time"] +
+            strain_names +
+            disp_names +
+            ["soil_plate_pressure", "agg_plate_pressure",
+             "soil_pore_water_pressure", "agg_pore_water_pressure"]
+        )
+        raw_file.write("\t".join(raw_header)   + "\n")
+        proc_file.write("\t".join(proc_header) + "\n")
 
         try:
             while True:
@@ -70,40 +111,63 @@ def run_acquisition():
                     number_of_samples_per_channel=SAMPLES_PER_READ)
                 disp_data = disp_task.read(
                     number_of_samples_per_channel=SAMPLES_PER_READ)
-                volt_data = volt_task.read(
+                volt_data = pressure_task.read(
                     number_of_samples_per_channel=SAMPLES_PER_READ)
 
-                # Process voltage using your formula
-                volt_data_np = np.array(volt_data)
-                processed_volt = process_voltage(volt_data_np)
+                # Per-channel values (first sample of each channel per row)
+                strain_vals = [strain_data[i][0] for i in range(8)]
+                disp_vals   = [disp_data[i][0]   for i in range(12)]
+
+                # Process voltage channels (first sample of each channel)
+                v17 = volt_data[0][0]
+                v18 = volt_data[1][0]
+                v19 = volt_data[2][0]
+                v20 = volt_data[3][0]
+                volt_vals = [process_soil_plate_pressure(v17),
+                             process_agg_plate_pressure(v18),
+                             process_soil_pore_water_pressure(v19),
+                             process_agg_pore_water_pressure(v20)]
+
+                # Set baseline on very first read
+                if baseline_strain is None:
+                    baseline_strain = strain_vals[:]
+                    baseline_disp   = disp_vals[:]
+                    baseline_volt   = volt_vals[:]
+
+                # Apply tare: rowN - row1
+                strain_tared = [strain_vals[i] - baseline_strain[i] for i in range(8)]
+                disp_tared   = [disp_vals[i]   - baseline_disp[i]   for i in range(12)]
+                volt_tared   = [volt_vals[i]    - baseline_volt[i]   for i in range(4)]
 
                 # Print real-time summary
-                print(f"\n[{datetime.now().strftime('%H:%M:%S')}]")
-                print(f"Strain (avg per ch):      {[round(np.mean(ch), 6) for ch in strain_data]}")
-                print(f"Displacement (avg per ch): {[round(np.mean(ch), 4) for ch in disp_data]}")
-                print(f"Voltage raw (avg per ch):  {[round(np.mean(ch), 4) for ch in volt_data]}")
-                print(f"Voltage processed:         {[round(np.mean(ch), 4) for ch in processed_volt]}")
-
-                # Save to dataframe
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-                row = {"timestamp": timestamp}
-                for i, ch in enumerate(strain_data):
-                    row[f"strain_ch{i+1}"] = np.mean(ch)
-                for i, ch in enumerate(disp_data):
-                    row[f"disp_ch{i+1}"] = np.mean(ch)
-                for i, ch in enumerate(volt_data):
-                    row[f"volt_raw_ch{i+1}"] = np.mean(ch)
-                for i, ch in enumerate(processed_volt):
-                    row[f"volt_processed_ch{i+1}"] = np.mean(ch)
-                all_data.append(row)
+                print(f"\n[{timestamp}]")
+                print(f"Strain tared:   {[round(v, 6) for v in strain_tared]}")
+                print(f"Disp tared:     {[round(v, 4) for v in disp_tared]}")
+                print(f"Pressure tared - SoilPlate:{round(volt_tared[0],4)}  AggPlate:{round(volt_tared[1],4)}  SoilPore:{round(volt_tared[2],4)}  AggPore:{round(volt_tared[3],4)}")
+
+                # Write raw data row (raw voltage, not converted or tared)
+                raw_row = [timestamp] + \
+                          [f"{v:.6f}" for v in strain_vals] + \
+                          [f"{v:.6f}" for v in disp_vals] + \
+                          [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"]
+                raw_file.write("\t".join(raw_row) + "\n")
+                raw_file.flush()
+
+                # Write processed and tared data row
+                proc_row = [timestamp] + \
+                           [f"{v:.6f}" for v in strain_tared] + \
+                           [f"{v:.6f}" for v in disp_tared] + \
+                           [f"{v:.6f}" for v in volt_tared]
+                proc_file.write("\t".join(proc_row) + "\n")
+                proc_file.flush()
 
         except KeyboardInterrupt:
             print("\nAcquisition stopped.")
-            # Save to CSV
-            df = pd.DataFrame(all_data)
-            filename = f"data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            df.to_csv(filename, index=False)
-            print(f"Data saved to {filename}")
+            raw_file.close()
+            proc_file.close()
+            print(f"Raw data saved to      {raw_filename}")
+            print(f"Processed data saved to {proc_filename}")
 
 # ─── RUN ──────────────────────────────────────────────────────
 if __name__ == "__main__":
