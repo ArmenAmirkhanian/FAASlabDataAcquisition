@@ -1,8 +1,9 @@
 import nidaqmx
-from nidaqmx.constants import (BridgeConfiguration, 
-                                ExcitationSource, 
+from nidaqmx.constants import (BridgeConfiguration,
+                                ExcitationSource,
                                 StrainGageBridgeType)
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 # ─── CONFIGURATION ────────────────────────────────────────────
 VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
@@ -104,6 +105,51 @@ def run_acquisition():
         raw_file.write("\t".join(raw_header)   + "\n")
         proc_file.write("\t".join(proc_header) + "\n")
 
+        # ── Live plot setup ───────────────────────────────────────
+        plt.ion()
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8))
+        fig.suptitle("Live DAQ Data")
+
+        # Data storage lists
+        t_data          = []
+        strain_plot     = [[] for _ in range(8)]
+        disp_plot       = [[] for _ in range(12)]
+        press_plot      = [[] for _ in range(4)]
+        b2bot_plot      = []   # DCDT_Left_Slab_B2_Bot (disp index 6)
+
+        # Plot 1: Time vs Strain
+        ax1.set_title("Strain (tared)")
+        ax1.set_xlabel("Time (s)")
+        ax1.set_ylabel("Strain")
+        strain_lines = [ax1.plot([], [], label=strain_names[i])[0] for i in range(8)]
+        ax1.legend(fontsize=6, loc="upper left")
+
+        # Plot 2: Time vs Displacement
+        ax2.set_title("Displacement (tared)")
+        ax2.set_xlabel("Time (s)")
+        ax2.set_ylabel("Displacement (V)")
+        disp_lines = [ax2.plot([], [], label=disp_names[i])[0] for i in range(12)]
+        ax2.legend(fontsize=6, loc="upper left")
+
+        # Plot 3: Time vs Pressure
+        press_labels = ["Soil Plate", "Agg Plate", "Soil Pore Water", "Agg Pore Water"]
+        ax3.set_title("Pressure (tared)")
+        ax3.set_xlabel("Time (s)")
+        ax3.set_ylabel("Pressure")
+        press_lines = [ax3.plot([], [], label=press_labels[i])[0] for i in range(4)]
+        ax3.legend(fontsize=7, loc="upper left")
+
+        # Plot 4: Soil & Agg Plate Pressure vs DCDT_Left_Slab_B2_Bot
+        ax4.set_title("Pressure vs DCDT_Left_Slab_B2_Bot")
+        ax4.set_xlabel("DCDT_Left_Slab_B2_Bot (V)")
+        ax4.set_ylabel("Pressure")
+        soil_plate_line, = ax4.plot([], [], label="Soil Plate Pressure")
+        agg_plate_line,  = ax4.plot([], [], label="Agg Plate Pressure")
+        ax4.legend(fontsize=7, loc="upper left")
+
+        plt.tight_layout()
+        start_time = None
+
         try:
             while True:
                 # Read all channels
@@ -138,6 +184,34 @@ def run_acquisition():
                 strain_tared = [strain_vals[i] - baseline_strain[i] for i in range(8)]
                 disp_tared   = [disp_vals[i]   - baseline_disp[i]   for i in range(12)]
                 volt_tared   = [volt_vals[i]    - baseline_volt[i]   for i in range(4)]
+
+                # ── Update live plots ─────────────────────────────
+                if start_time is None:
+                    start_time = datetime.now()
+                elapsed = (datetime.now() - start_time).total_seconds()
+                t_data.append(elapsed)
+
+                for i in range(8):
+                    strain_plot[i].append(strain_tared[i])
+                for i in range(12):
+                    disp_plot[i].append(disp_tared[i])
+                for i in range(4):
+                    press_plot[i].append(volt_tared[i])
+                b2bot_plot.append(disp_tared[6])   # DCDT_Left_Slab_B2_Bot
+
+                for i, line in enumerate(strain_lines):
+                    line.set_data(t_data, strain_plot[i])
+                for i, line in enumerate(disp_lines):
+                    line.set_data(t_data, disp_plot[i])
+                for i, line in enumerate(press_lines):
+                    line.set_data(t_data, press_plot[i])
+                soil_plate_line.set_data(b2bot_plot, press_plot[0])
+                agg_plate_line.set_data(b2bot_plot, press_plot[1])
+
+                for ax in [ax1, ax2, ax3, ax4]:
+                    ax.relim()
+                    ax.autoscale_view()
+                plt.pause(0.001)
 
                 # Print real-time summary
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
