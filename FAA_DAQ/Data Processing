@@ -27,7 +27,8 @@ def process_agg_pore_water_pressure(raw):
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
     with nidaqmx.Task() as strain_task, \
-         nidaqmx.Task() as voltage_task:
+         nidaqmx.Task() as disp_task, \
+         nidaqmx.Task() as pressure_task:
 
         # -- Strain channels (NI-9235, Slot 2, 8 channels) --
         for ch in range(8):
@@ -41,17 +42,17 @@ def run_acquisition():
                 nominal_gage_resistance=120.0  # 120 ohm as per your hardware
             )
 
-        # -- Displacement + Pressure channels combined in one task (NI-9205, Slot 1) --
-        # Indices 0-11  → displacement (ai0 to ai11)
-        # Indices 12-15 → pressure     (ai17 to ai20)
+        # -- Displacement channels (NI-9205, Slot 1, ch0 to ch11) --
         for ch in range(12):
-            voltage_task.ai_channels.add_ai_voltage_chan(
+            disp_task.ai_channels.add_ai_voltage_chan(
                 f"{VOLTAGE_MODULE}/ai{ch}",
                 min_val=-10.0,
                 max_val=10.0
             )
+
+        # -- Pressure channels (NI-9205, Slot 1, ch17 to ch20) --
         for ch in [17, 18, 19, 20]:
-            voltage_task.ai_channels.add_ai_voltage_chan(
+            pressure_task.ai_channels.add_ai_voltage_chan(
                 f"{VOLTAGE_MODULE}/ai{ch}",
                 min_val=-10.0,
                 max_val=10.0
@@ -59,7 +60,8 @@ def run_acquisition():
 
         # -- Set sample rates --
         strain_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
-        voltage_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+        disp_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+        pressure_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
 
         print("Acquisition started... Press Ctrl+C to stop")
 
@@ -146,27 +148,27 @@ def run_acquisition():
         ax4.legend(fontsize=7, loc="upper left")
 
         plt.tight_layout()
-        plt.show(block=False)
         start_time = None
 
         try:
             while True:
                 # Read all channels
-                strain_data  = strain_task.read(
+                strain_data = strain_task.read(
                     number_of_samples_per_channel=SAMPLES_PER_READ)
-                voltage_data = voltage_task.read(
+                disp_data = disp_task.read(
+                    number_of_samples_per_channel=SAMPLES_PER_READ)
+                volt_data = pressure_task.read(
                     number_of_samples_per_channel=SAMPLES_PER_READ)
 
                 # Per-channel values (first sample of each channel per row)
-                # voltage_data indices 0-11 = displacement, 12-15 = pressure
-                strain_vals = [strain_data[i][0]  for i in range(8)]
-                disp_vals   = [voltage_data[i][0] for i in range(12)]
+                strain_vals = [strain_data[i][0] for i in range(8)]
+                disp_vals   = [disp_data[i][0]   for i in range(12)]
 
                 # Process voltage channels (first sample of each channel)
-                v17 = voltage_data[12][0]
-                v18 = voltage_data[13][0]
-                v19 = voltage_data[14][0]
-                v20 = voltage_data[15][0]
+                v17 = volt_data[0][0]
+                v18 = volt_data[1][0]
+                v19 = volt_data[2][0]
+                v20 = volt_data[3][0]
                 volt_vals = [process_soil_plate_pressure(v17),
                              process_agg_plate_pressure(v18),
                              process_soil_pore_water_pressure(v19),
@@ -244,3 +246,4 @@ def run_acquisition():
 # ─── RUN ──────────────────────────────────────────────────────
 if __name__ == "__main__":
     run_acquisition()
+    
