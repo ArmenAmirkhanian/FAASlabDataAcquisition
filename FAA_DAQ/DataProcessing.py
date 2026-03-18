@@ -37,7 +37,7 @@ def run_acquisition():
                 initial_bridge_voltage=0.0,
                 strain_config=StrainGageBridgeType.QUARTER_BRIDGE_I,
                 voltage_excit_source=ExcitationSource.INTERNAL,
-                voltage_excit_val=2.5,
+                voltage_excit_val=2.0,
                 nominal_gage_resistance=120.0  # 120 ohm as per your hardware
             )
 
