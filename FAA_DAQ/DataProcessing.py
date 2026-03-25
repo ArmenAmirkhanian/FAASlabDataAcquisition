@@ -88,17 +88,17 @@ def run_acquisition():
         ]
 
         raw_header = (
-            ["time"] +
-            strain_names +
+            ["time_s"] +
             disp_names +
-            ["volt_ch17", "volt_ch18", "volt_ch19", "volt_ch20"]
+            ["volt_ch17", "volt_ch18", "volt_ch19", "volt_ch20"] +
+            strain_names
         )
         proc_header = (
-            ["time"] +
-            strain_names +
+            ["time_s"] +
             disp_names +
             ["soil_plate_pressure", "agg_plate_pressure",
-             "soil_pore_water_pressure", "agg_pore_water_pressure"]
+             "soil_pore_water_pressure", "agg_pore_water_pressure"] +
+            strain_names
         )
         raw_file.write("\t".join(raw_header)   + "\n")
         proc_file.write("\t".join(proc_header) + "\n")
@@ -212,25 +212,24 @@ def run_acquisition():
                 plt.pause(0.001)
 
                 # Print real-time summary
-                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-                print(f"\n[{timestamp}]")
+                print(f"\n[t={elapsed:.2f}s]")
                 print(f"Strain tared:   {[round(v, 6) for v in strain_tared]}")
                 print(f"Disp tared:     {[round(v, 4) for v in disp_tared]}")
                 print(f"Pressure tared - SoilPlate:{round(volt_tared[0],4)}  AggPlate:{round(volt_tared[1],4)}  SoilPore:{round(volt_tared[2],4)}  AggPore:{round(volt_tared[3],4)}")
 
                 # Write raw data row (raw voltage, not converted or tared)
-                raw_row = [timestamp] + \
-                          [f"{v:.6f}" for v in strain_vals] + \
+                raw_row = [f"{elapsed:.3f}"] + \
                           [f"{v:.6f}" for v in disp_vals] + \
-                          [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"]
+                          [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
+                          [f"{v:.6f}" for v in strain_vals]
                 raw_file.write("\t".join(raw_row) + "\n")
                 raw_file.flush()
 
                 # Write processed and tared data row
-                proc_row = [timestamp] + \
-                           [f"{v:.6f}" for v in strain_tared] + \
+                proc_row = [f"{elapsed:.3f}"] + \
                            [f"{v:.6f}" for v in disp_tared] + \
-                           [f"{v:.6f}" for v in volt_tared]
+                           [f"{v:.6f}" for v in volt_tared] + \
+                           [f"{v:.6f}" for v in strain_tared]
                 proc_file.write("\t".join(proc_row) + "\n")
                 proc_file.flush()
 
