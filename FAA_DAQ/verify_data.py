@@ -11,6 +11,13 @@ SIGNAL_FILE = r"C:\Users\akumari1\OneDrive - The University of Alabama\FAA Flood
 # ─── COMPARISON INTERVAL ──────────────────────────────────────────────────────
 COMPARE_EVERY_N = 50    # Compare percentage difference after every 50th data point
 
+# ─── LOAD ALIGNMENT SHIFT ─────────────────────────────────────────────────────
+# Shifts the entire Python dataset to align its load curve with Signal Express.
+# None  → auto-detect using cross-correlation (recommended first run)
+# +N    → skip first N rows from Python start  (Python started recording N rows too early)
+# -N    → skip first N rows from SE start      (SE started recording N rows too early)
+PY_ROW_OFFSET = None
+
 # ─── PRESSURE CONVERSION FORMULAS ─────────────────────────────────────────────
 # Each function takes raw voltage and returns pressure in kips
 def process_soil_plate_pressure(raw):
@@ -47,16 +54,15 @@ se_data_sheet = pd.read_excel(SIGNAL_FILE, sheet_name=1, header=0)
 # Column C is index 2 (A=0, B=1, C=2)
 py_load_raw = py_load_sheet.iloc[:, 2].dropna().values.astype(float)
 se_load_raw = se_load_sheet.iloc[:, 2].dropna().values.astype(float)
-# iloc[:, 2] means: all rows, column index 2 (Column C)
-# .dropna() removes any empty cells
-# .values converts to a simple number array
-# .astype(float) makes sure all values are numbers
+
+# ─── EXTRACT TIME (Sheet 1, Column A, data starts row 9) ──────────────────────
+# Column A is index 0; header=7 already skips rows 1-8, so iloc gives rows from row 9
+py_time_raw = py_load_sheet.iloc[:, 0].dropna().values
+se_time_raw = se_load_sheet.iloc[:, 0].dropna().values
 
 # ─── TARE LOAD (subtract first value so it starts at 0) ───────────────────────
 py_load = py_load_raw - py_load_raw[0]
 se_load = se_load_raw - se_load_raw[0]
-# Taring means subtracting the very first reading from all readings
-# This sets the starting point to zero
 
 # ─── EXTRACT DISPLACEMENT (Sheet 2, Columns B to M = index 1 to 12) ───────────
 # Python file displacement column names
@@ -146,115 +152,202 @@ se_pressure = np.column_stack([
 py_pressure = py_pressure - py_pressure[0, :]
 se_pressure = se_pressure - se_pressure[0, :]
 
+# ─── STEP 1: TRIM EACH DATASET INTERNALLY ────────────────────────────────────
+# Make sure load/time and sensor arrays are the same length within each file
+py_n = min(len(py_load), len(py_disp), len(py_time_raw))
+se_n = min(len(se_load), len(se_disp), len(se_time_raw))
+
+py_load     = py_load[:py_n];      se_load     = se_load[:se_n]
+py_time     = py_time_raw[:py_n];  se_time     = se_time_raw[:se_n]
+py_disp     = py_disp[:py_n];      se_disp     = se_disp[:se_n]
+py_strain   = py_strain[:py_n];    se_strain   = se_strain[:se_n]
+py_pressure = py_pressure[:py_n];  se_pressure = se_pressure[:se_n]
+
+# ─── STEP 2: SHIFT PYTHON TO ALIGN LOAD CURVES ───────────────────────────────
+# Auto-detect the row offset using cross-correlation on the load signals.
+# Both load arrays are resampled to the same length so their shapes don't matter.
+# The correlation peak tells us how many rows one dataset is ahead of the other.
+def _detect_offset(py_ld, se_ld):
+    n = max(len(py_ld), len(se_ld))
+    # Resample both to length n using linear interpolation
+    py_r = np.interp(np.linspace(0, 1, n), np.linspace(0, 1, len(py_ld)), py_ld)
+    se_r = np.interp(np.linspace(0, 1, n), np.linspace(0, 1, len(se_ld)), se_ld)
+    # Cross-correlate: find how much py_r must shift to match se_r
+    corr = np.correlate(se_r - se_r.mean(), py_r - py_r.mean(), mode='full')
+    lag = int(np.argmax(corr)) - (n - 1)
+    # lag > 0 → SE started earlier; convert to SE rows and return as negative offset
+    # lag < 0 → Python started earlier; convert to Python rows and return as positive offset
+    if lag > 0:
+        return -int(round(lag * len(se_ld) / n))   # trim SE start
+    else:
+        return  int(round(-lag * len(py_ld) / n))  # trim Python start
+
+offset = PY_ROW_OFFSET if PY_ROW_OFFSET is not None else _detect_offset(py_load, se_load)
+
+if offset > 0:
+    # Python started recording earlier — skip its first `offset` rows
+    py_load     = py_load[offset:];     se_load     = se_load
+    py_time     = py_time[offset:];     se_time     = se_time
+    py_disp     = py_disp[offset:];     se_disp     = se_disp
+    py_strain   = py_strain[offset:];   se_strain   = se_strain
+    py_pressure = py_pressure[offset:]; se_pressure = se_pressure
+    print(f"Shift applied: skipped first {offset} Python rows (Python started earlier)")
+elif offset < 0:
+    # SE started recording earlier — skip its first `|offset|` rows
+    n = -offset
+    py_load     = py_load;     se_load     = se_load[n:]
+    py_time     = py_time;     se_time     = se_time[n:]
+    py_disp     = py_disp;     se_disp     = se_disp[n:]
+    py_strain   = py_strain;   se_strain   = se_strain[n:]
+    py_pressure = py_pressure; se_pressure = se_pressure[n:]
+    print(f"Shift applied: skipped first {n} SE rows (SE started earlier)")
+else:
+    print("No shift applied — load curves already aligned")
+
+# ─── STEP 3: MATCH BY LOAD VALUE ─────────────────────────────────────────────
+# After the whole-dataset shift above the two curves start at the same load state.
+# Because sample rates still differ, rows still don't correspond 1-to-1.
+# For each Python row, find the SE row with the closest load value (nearest neighbour).
+se_match_idx = np.array([np.argmin(np.abs(se_load - lv)) for lv in py_load])
+
+# Build matched SE arrays (same length as Python, compared at equal load levels)
+se_disp_m   = se_disp[se_match_idx]
+se_strain_m = se_strain[se_match_idx]
+se_press_m  = se_pressure[se_match_idx]
+
 # ─── PERCENTAGE DIFFERENCE FUNCTION ───────────────────────────────────────────
 def percent_diff(val1, val2):
-    # Calculates percentage difference between two values
-    # Uses average of both as the reference (standard engineering method)
     avg = (np.abs(val1) + np.abs(val2)) / 2
-    # np.where avoids dividing by zero — if avg is 0, result is 0
     return np.where(avg != 0, np.abs(val1 - val2) / avg * 100, 0)
 
 # ─── PRINT PERCENTAGE DIFFERENCE TABLE ────────────────────────────────────────
-def print_comparison_table(py_vals, se_vals, label, col_names):
+def print_comparison_table(py_vals, se_vals_matched, label, col_names):
+    # Compares Python rows vs the SE rows matched to the same load value
     print(f"\n{'='*60}")
     print(f"PERCENTAGE DIFFERENCE — {label} (every {COMPARE_EVERY_N} points)")
     print(f"{'='*60}")
-
-    # Loop through data every 50th point
-    indices = range(0, min(len(py_vals), len(se_vals)), COMPARE_EVERY_N)
+    indices = range(0, len(py_vals), COMPARE_EVERY_N)
     for i in indices:
-        diffs = percent_diff(py_vals[i], se_vals[i])
-        # If diffs is a single number (1D), wrap it in a list
+        diffs = percent_diff(py_vals[i], se_vals_matched[i])
         if np.ndim(diffs) == 0:
             diffs = [diffs]
         diff_str = "  ".join([f"{n}: {d:.2f}%" for n, d in zip(col_names, diffs)])
-        print(f"  Point {i+1:>5}: {diff_str}")
+        print(f"  Load {py_load[i]:.4f} kips (PY row {i+1}): {diff_str}")
 
-# Print tables for all parameters
-print_comparison_table(py_load, se_load, "LOAD (kips)", ["Load"])
-print_comparison_table(py_disp, se_disp, "DISPLACEMENT", py_disp_cols)
-print_comparison_table(py_strain, se_strain, "STRAIN", py_strain_cols)
 pressure_names = ["Soil Plate", "Agg Plate", "Soil Pore Water", "Agg Pore Water"]
-print_comparison_table(py_pressure, se_pressure, "PRESSURE", pressure_names)
 
-# ─── PLOTTING ─────────────────────────────────────────────────────────────────
-# Use the shorter dataset length to avoid index errors
-min_load_len   = min(len(py_load), len(se_load))
-min_data_len   = min(len(py_disp), len(se_disp))
+print_comparison_table(py_disp,     se_disp_m,   "DISPLACEMENT", py_disp_cols)
+print_comparison_table(py_strain,   se_strain_m, "STRAIN",       py_strain_cols)
+print_comparison_table(py_pressure, se_press_m,  "PRESSURE",     pressure_names)
 
-# Short names for displacement legend (easier to read on plot)
-disp_short = ['A1R', 'A2R', 'A3R', 'B1R', 'B3R', 'B1L', 'B2L', 'B3L', 'C1L', 'C2L', 'C3L', 'Beam']
+# ─── COMBINED 2×2 OVERVIEW FIGURE ─────────────────────────────────────────────
+disp_short   = ['A1R', 'A2R', 'A3R', 'B1R', 'B3R', 'B1L', 'B2L', 'B3L', 'C1L', 'C2L', 'C3L', 'Beam']
 strain_short = ['SG2E_t', 'SG3E_t', 'SG4E_t', 'SG4E_b', 'SG5E_t', 'SG5E_b', 'SG6E_t', 'SG7E_t']
+press_short  = ['SoilPlate', 'AggPlate', 'SoilPore', 'AggPore']
 
-# ── Plot 1: Load vs Displacement ──────────────────────────────────────────────
+fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+fig.suptitle('Python vs Signal Express — Load-Matched Comparison', fontsize=14)
+
+# ── Panel 1: Load vs Displacement (all 12 channels overlaid) ──────────────────
+for i in range(12):
+    ax1.plot(py_disp[:, i],   py_load, color='blue', linewidth=0.8,
+             label=f'PY {disp_short[i]}' if i == 0 else '_')
+    ax1.plot(se_disp_m[:, i], py_load, color='red',  linewidth=0.8, alpha=0.7,
+             label=f'SE {disp_short[i]}' if i == 0 else '_')
+ax1.set_title('Load vs Displacement')
+ax1.set_xlabel('Displacement (V)')
+ax1.set_ylabel('Load (kips)')
+ax1.legend(['Python', 'Signal Express'], fontsize=8, loc='upper left')
+ax1.grid(True)
+
+# ── Panel 2: Load vs Strain (all 8 channels overlaid) ─────────────────────────
+for i in range(8):
+    ax2.plot(py_strain[:, i],   py_load, color='blue', linewidth=0.8,
+             label='Python' if i == 0 else '_')
+    ax2.plot(se_strain_m[:, i], py_load, color='red',  linewidth=0.8, alpha=0.7,
+             label='Signal Express' if i == 0 else '_')
+ax2.set_title('Load vs Strain')
+ax2.set_xlabel('Strain')
+ax2.set_ylabel('Load (kips)')
+ax2.legend(fontsize=8, loc='upper left')
+ax2.grid(True)
+
+# ── Panel 3: Load vs Pressure (all 4 channels overlaid) ──────────────────────
+for i in range(4):
+    ax3.plot(py_pressure[:, i], py_load, color='blue', linewidth=0.8,
+             label=f'PY {press_short[i]}')
+    ax3.plot(se_press_m[:, i],  py_load, color='red',  linewidth=0.8, alpha=0.7,
+             label=f'SE {press_short[i]}')
+ax3.set_title('Load vs Pressure')
+ax3.set_xlabel('Pressure')
+ax3.set_ylabel('Load (kips)')
+ax3.legend(fontsize=7, loc='upper left')
+ax3.grid(True)
+
+# ── Panel 4: Time vs Load (raw recording from each system) ────────────────────
+ax4.plot(py_time, py_load, color='blue', linewidth=1,   label='Python')
+ax4.plot(se_time, se_load, color='red',  linewidth=1, alpha=0.7, label='Signal Express')
+ax4.set_title('Time vs Load')
+ax4.set_xlabel('Time')
+ax4.set_ylabel('Load (kips)')
+ax4.legend(fontsize=8, loc='upper left')
+ax4.grid(True)
+
+plt.tight_layout()
+plt.savefig('comparison_overview.png', dpi=150)
+print("\nSaved: comparison_overview.png")
+
+# ─── DETAILED PER-CHANNEL FIGURES ─────────────────────────────────────────────
+# ── Detailed: Load vs Displacement ────────────────────────────────────────────
 fig1, axes1 = plt.subplots(4, 3, figsize=(18, 16))
-# Creates a grid of 4 rows x 3 columns = 12 subplots, one per displacement channel
 axes1 = axes1.flatten()
-# .flatten() converts the 2D grid into a simple list so we can loop through it
-
-for i in range(12):   # Loop through all 12 displacement channels
+for i in range(12):
     ax = axes1[i]
-    ax.plot(py_disp[:min_data_len, i], py_load[:min_data_len],
-            label='Python', color='blue', linewidth=1)
-    ax.plot(se_disp[:min_data_len, i], se_load[:min_data_len],
-            label='Signal Express', color='red', linewidth=1, alpha=0.7)
+    ax.plot(py_disp[:, i],   py_load, label='Python',         color='blue', linewidth=1)
+    ax.plot(se_disp_m[:, i], py_load, label='Signal Express', color='red',  linewidth=1, alpha=0.7)
     ax.set_title(disp_short[i], fontsize=10)
     ax.set_xlabel('Displacement')
     ax.set_ylabel('Load (kips)')
     ax.legend(fontsize=7)
     ax.grid(True)
-
 fig1.suptitle('Load vs Displacement — Python vs Signal Express', fontsize=14)
-# suptitle adds a big title at the top of the entire figure
 plt.tight_layout()
 plt.savefig('load_vs_displacement.png', dpi=150)
-# Saves the plot as an image file in your project folder
-print("\nSaved: load_vs_displacement.png")
+print("Saved: load_vs_displacement.png")
 
-# ── Plot 2: Load vs Strain ─────────────────────────────────────────────────────
+# ── Detailed: Load vs Strain ───────────────────────────────────────────────────
 fig2, axes2 = plt.subplots(2, 4, figsize=(18, 10))
-# Creates a grid of 2 rows x 4 columns = 8 subplots, one per strain channel
 axes2 = axes2.flatten()
-
-for i in range(8):    # Loop through all 8 strain channels
+for i in range(8):
     ax = axes2[i]
-    ax.plot(py_strain[:min_data_len, i], py_load[:min_data_len],
-            label='Python', color='blue', linewidth=1)
-    ax.plot(se_strain[:min_data_len, i], se_load[:min_data_len],
-            label='Signal Express', color='red', linewidth=1, alpha=0.7)
+    ax.plot(py_strain[:, i],   py_load, label='Python',         color='blue', linewidth=1)
+    ax.plot(se_strain_m[:, i], py_load, label='Signal Express', color='red',  linewidth=1, alpha=0.7)
     ax.set_title(strain_short[i], fontsize=10)
     ax.set_xlabel('Strain')
     ax.set_ylabel('Load (kips)')
     ax.legend(fontsize=7)
     ax.grid(True)
-
 fig2.suptitle('Load vs Strain — Python vs Signal Express', fontsize=14)
 plt.tight_layout()
 plt.savefig('load_vs_strain.png', dpi=150)
 print("Saved: load_vs_strain.png")
 
-# ── Plot 3: Load vs Pressure ───────────────────────────────────────────────────
+# ── Detailed: Load vs Pressure ─────────────────────────────────────────────────
 fig3, axes3 = plt.subplots(2, 2, figsize=(14, 10))
-# Creates a 2x2 grid = 4 subplots, one per pressure channel
 axes3 = axes3.flatten()
-
-for i in range(4):    # Loop through all 4 pressure channels
+for i in range(4):
     ax = axes3[i]
-    ax.plot(py_pressure[:min_data_len, i], py_load[:min_data_len],
-            label='Python', color='blue', linewidth=1)
-    ax.plot(se_pressure[:min_data_len, i], se_load[:min_data_len],
-            label='Signal Express', color='red', linewidth=1, alpha=0.7)
+    ax.plot(py_pressure[:, i], py_load, label='Python',         color='blue', linewidth=1)
+    ax.plot(se_press_m[:, i],  py_load, label='Signal Express', color='red',  linewidth=1, alpha=0.7)
     ax.set_title(pressure_names[i], fontsize=10)
     ax.set_xlabel('Pressure')
     ax.set_ylabel('Load (kips)')
     ax.legend(fontsize=7)
     ax.grid(True)
-
 fig3.suptitle('Load vs Pressure — Python vs Signal Express', fontsize=14)
 plt.tight_layout()
 plt.savefig('load_vs_pressure.png', dpi=150)
 print("Saved: load_vs_pressure.png")
 
 plt.show()
-# Opens all three plot windows on your screen
 print("\nDone! All plots saved to your project folder.")
