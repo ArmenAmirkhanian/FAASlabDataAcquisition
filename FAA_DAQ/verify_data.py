@@ -240,59 +240,18 @@ print_comparison_table(py_disp,     se_disp_m,   "DISPLACEMENT", py_disp_cols)
 print_comparison_table(py_strain,   se_strain_m, "STRAIN",       py_strain_cols)
 print_comparison_table(py_pressure, se_press_m,  "PRESSURE",     pressure_names)
 
-# ─── COMBINED 2×2 OVERVIEW FIGURE ─────────────────────────────────────────────
+# ─── OVERVIEW: TIME vs LOAD ───────────────────────────────────────────────────
 disp_short   = ['A1R', 'A2R', 'A3R', 'B1R', 'B3R', 'B1L', 'B2L', 'B3L', 'C1L', 'C2L', 'C3L', 'Beam']
 strain_short = ['SG2E_t', 'SG3E_t', 'SG4E_t', 'SG4E_b', 'SG5E_t', 'SG5E_b', 'SG6E_t', 'SG7E_t']
-press_short  = ['SoilPlate', 'AggPlate', 'SoilPore', 'AggPore']
 
-fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-fig.suptitle('Python vs Signal Express — Load-Matched Comparison', fontsize=14)
-
-# ── Panel 1: Load vs Displacement (all 12 channels overlaid) ──────────────────
-for i in range(12):
-    ax1.plot(py_disp[:, i],   py_load, color='blue', linewidth=0.8,
-             label=f'PY {disp_short[i]}' if i == 0 else '_')
-    ax1.plot(se_disp_m[:, i], py_load, color='red',  linewidth=0.8, alpha=0.7,
-             label=f'SE {disp_short[i]}' if i == 0 else '_')
-ax1.set_title('Load vs Displacement')
-ax1.set_xlabel('Displacement (V)')
-ax1.set_ylabel('Load (kips)')
-ax1.legend(['Python', 'Signal Express'], fontsize=8, loc='upper left')
-ax1.grid(True)
-
-# ── Panel 2: Load vs Strain (all 8 channels overlaid) ─────────────────────────
-for i in range(8):
-    ax2.plot(py_strain[:, i],   py_load, color='blue', linewidth=0.8,
-             label='Python' if i == 0 else '_')
-    ax2.plot(se_strain_m[:, i], py_load, color='red',  linewidth=0.8, alpha=0.7,
-             label='Signal Express' if i == 0 else '_')
-ax2.set_title('Load vs Strain')
-ax2.set_xlabel('Strain')
-ax2.set_ylabel('Load (kips)')
-ax2.legend(fontsize=8, loc='upper left')
-ax2.grid(True)
-
-# ── Panel 3: Load vs Pressure (all 4 channels overlaid) ──────────────────────
-for i in range(4):
-    ax3.plot(py_pressure[:, i], py_load, color='blue', linewidth=0.8,
-             label=f'PY {press_short[i]}')
-    ax3.plot(se_press_m[:, i],  py_load, color='red',  linewidth=0.8, alpha=0.7,
-             label=f'SE {press_short[i]}')
-ax3.set_title('Load vs Pressure')
-ax3.set_xlabel('Pressure')
-ax3.set_ylabel('Load (kips)')
-ax3.legend(fontsize=7, loc='upper left')
-ax3.grid(True)
-
-# ── Panel 4: Time vs Load (raw recording from each system) ────────────────────
-ax4.plot(py_time, py_load, color='blue', linewidth=1,   label='Python')
-ax4.plot(se_time, se_load, color='red',  linewidth=1, alpha=0.7, label='Signal Express')
-ax4.set_title('Time vs Load')
-ax4.set_xlabel('Time')
-ax4.set_ylabel('Load (kips)')
-ax4.legend(fontsize=8, loc='upper left')
-ax4.grid(True)
-
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(py_time, py_load, color='blue', linewidth=1,          label='Python')
+ax.plot(se_time, se_load, color='red',  linewidth=1, alpha=0.7, label='Signal Express')
+ax.set_title('Time vs Load — Python vs Signal Express')
+ax.set_xlabel('Time')
+ax.set_ylabel('Load (kips)')
+ax.legend(fontsize=9)
+ax.grid(True)
 plt.tight_layout()
 plt.savefig('comparison_overview.png', dpi=150)
 print("\nSaved: comparison_overview.png")
