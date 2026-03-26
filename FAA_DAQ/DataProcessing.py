@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 # ─── CONFIGURATION ────────────────────────────────────────────
 VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
-SAMPLE_RATE    = 10           # Samples per second
+SAMPLE_RATE    = 32           # Samples per second
 SAMPLES_PER_READ = 10         # How many samples to read each loop
 
 # ─── PRESSURE CONVERSION FORMULAS (one per channel) ──────────

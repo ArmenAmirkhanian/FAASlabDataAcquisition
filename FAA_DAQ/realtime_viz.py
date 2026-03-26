@@ -6,7 +6,7 @@ import numpy as np                # For math calculations
 
 # ─── FILE PATH ────────────────────────────────────────────────────────────────
 # Update this to the exact path where Signal Express saves your .txt file
-DATA_FILE = r"C:\path\to\your\trial.txt"   # ← Change this to your actual file path
+DATA_FILE = r"D:\Armen_Research\Archana\Soil Pit_Concrete Slab\\trial_2.txt"   # ← Change this to your actual file path
 
 # ─── HOW OFTEN TO UPDATE THE PLOT (in milliseconds) ──────────────────────────
 UPDATE_INTERVAL = 1000   # 1000ms = every 1 second
@@ -77,6 +77,7 @@ def process_agg_pore_water_pressure(raw):
 # Subtracting the first reading from all future readings zeroes everything out
 tare_values = {}       # Empty dictionary to store first-row values
 tare_set    = False    # Flag to track whether tare has been set yet
+last_row_count = 0     # Track how many rows have already been plotted
 
 # ─── READ AND PROCESS DATA FROM FILE ──────────────────────────────────────────
 def read_data():
@@ -165,75 +166,84 @@ fig.suptitle('Real Time Data Visualization', fontsize=14)
 def update(frame):
     """
     This function runs automatically every UPDATE_INTERVAL milliseconds.
-    It reads the latest data and redraws all 4 plots.
+    It reads only the new rows since the last update and appends them to the plots.
     frame is just a counter that matplotlib passes in — we don't use it directly
     """
+    global last_row_count
+
     df = read_data()    # Read the latest data from file
 
     # If file is empty or couldn't be read, skip this update
     if df.empty:
         return
 
-    time = df[TIME_COL].values   # Extract time column as a simple array
+    # Only process rows that are new since last update
+    new_df = df.iloc[last_row_count:]
+    if new_df.empty:
+        return
 
-    # ── Clear all plots before redrawing ────────────────────────────────────
-    # This prevents old lines from building up on the plot
-    ax_strain.cla()
-    ax_disp.cla()
-    ax_pressure.cla()
-    ax_pres_disp.cla()
+    new_time = new_df[TIME_COL].values
 
     # ── Plot 1: Time vs Strain (top left) ───────────────────────────────────
     for col, name in zip(STRAIN_COLS, STRAIN_NAMES):
-        # zip() pairs each column name with its short display name
-        if col in df.columns:
-            ax_strain.plot(time, df[col].values, label=name, linewidth=1)
-    ax_strain.set_title('Time vs Strain')
-    ax_strain.set_xlabel('Time (s)')
-    ax_strain.set_ylabel('Strain')
-    ax_strain.legend(fontsize=7, loc='upper left')
-    ax_strain.grid(True)
+        if col in new_df.columns:
+            ax_strain.plot(new_time, new_df[col].values, label=name if last_row_count == 0 else '_nolegend_', linewidth=1)
 
     # ── Plot 2: Time vs Displacement (top right) ─────────────────────────────
     for col, name in zip(DISP_COLS, DISP_NAMES):
-        if col in df.columns:
-            ax_disp.plot(time, df[col].values, label=name, linewidth=1)
-    ax_disp.set_title('Time vs Displacement')
-    ax_disp.set_xlabel('Time (s)')
-    ax_disp.set_ylabel('Displacement')
-    ax_disp.legend(fontsize=7, loc='upper left')
-    ax_disp.grid(True)
+        if col in new_df.columns:
+            ax_disp.plot(new_time, new_df[col].values, label=name if last_row_count == 0 else '_nolegend_', linewidth=1)
 
     # ── Plot 3: Time vs Pressure (bottom left) ───────────────────────────────
     for col, name in zip(PRESSURE_COLS, VOLT_NAMES):
-        if col in df.columns:
-            ax_pressure.plot(time, df[col].values, label=name, linewidth=1)
-    ax_pressure.set_title('Time vs Pressure')
-    ax_pressure.set_xlabel('Time (s)')
-    ax_pressure.set_ylabel('Pressure')
-    ax_pressure.legend(fontsize=7, loc='upper left')
-    ax_pressure.grid(True)
+        if col in new_df.columns:
+            ax_pressure.plot(new_time, new_df[col].values, label=name if last_row_count == 0 else '_nolegend_', linewidth=1)
 
     # ── Plot 4: Pressure vs Displacement B2_Bot (bottom right) ───────────────
-    # This is the special plot — displacement on horizontal axis
     b2_bot_col = "Subset Voltage - ai6_DCDT_Left_Slab_B2_Bot"
-    # We plot each pressure channel against B2_Bot displacement
     for col, name in zip(PRESSURE_COLS, VOLT_NAMES):
-        if col in df.columns and b2_bot_col in df.columns:
+        if col in new_df.columns and b2_bot_col in new_df.columns:
             ax_pres_disp.plot(
-                df[b2_bot_col].values,   # X axis = displacement
-                df[col].values,          # Y axis = pressure
-                label=name,
+                new_df[b2_bot_col].values,
+                new_df[col].values,
+                label=name if last_row_count == 0 else '_nolegend_',
                 linewidth=1
             )
-    ax_pres_disp.set_title('Pressure vs Displacement (DCDT_Left_Slab_B2_Bot)')
-    ax_pres_disp.set_xlabel('Displacement (B2_Bot)')
-    ax_pres_disp.set_ylabel('Pressure')
-    ax_pres_disp.legend(fontsize=7, loc='upper left')
-    ax_pres_disp.grid(True)
 
-    plt.tight_layout()
-    # tight_layout adjusts spacing so plots don't overlap each other
+    # Add legends and labels only on first draw
+    if last_row_count == 0:
+        ax_strain.set_title('Time vs Strain')
+        ax_strain.set_xlabel('Time (s)')
+        ax_strain.set_ylabel('Strain')
+        ax_strain.legend(fontsize=7, loc='upper left')
+        ax_strain.grid(True)
+
+        ax_disp.set_title('Time vs Displacement')
+        ax_disp.set_xlabel('Time (s)')
+        ax_disp.set_ylabel('Displacement')
+        ax_disp.legend(fontsize=7, loc='upper left')
+        ax_disp.grid(True)
+
+        ax_pressure.set_title('Time vs Pressure')
+        ax_pressure.set_xlabel('Time (s)')
+        ax_pressure.set_ylabel('Pressure')
+        ax_pressure.legend(fontsize=7, loc='upper left')
+        ax_pressure.grid(True)
+
+        ax_pres_disp.set_title('Pressure vs Displacement (DCDT_Left_Slab_B2_Bot)')
+        ax_pres_disp.set_xlabel('Displacement (B2_Bot)')
+        ax_pres_disp.set_ylabel('Pressure')
+        ax_pres_disp.legend(fontsize=7, loc='upper left')
+        ax_pres_disp.grid(True)
+
+        plt.tight_layout()
+
+    # Rescale all axes to fit the full data range
+    for ax in [ax_strain, ax_disp, ax_pressure, ax_pres_disp]:
+        ax.relim()
+        ax.autoscale_view()
+
+    last_row_count = len(df)   # Update count to include rows just plotted
 
 # ─── START ANIMATION ──────────────────────────────────────────────────────────
 ani = animation.FuncAnimation(
