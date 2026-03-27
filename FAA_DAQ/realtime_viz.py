@@ -6,7 +6,7 @@ import numpy as np                # For math calculations
 
 # ─── FILE PATH ────────────────────────────────────────────────────────────────
 # Update this to the exact path where Signal Express saves your .txt file
-DATA_FILE = r"D:\Armen_Research\Archana\Soil Pit_Concrete Slab\\trial_2.txt"   # ← Change this to your actual file path
+DATA_FILE = r"D:\Armen_Research\Archana\Soil Pit_Concrete Slab\\trial_12.txt"   # ← Change this to your actual file path
 
 # ─── HOW OFTEN TO UPDATE THE PLOT (in milliseconds) ──────────────────────────
 UPDATE_INTERVAL = 1000   # 1000ms = every 1 second
