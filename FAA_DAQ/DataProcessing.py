@@ -16,6 +16,7 @@ STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
 SAMPLE_RATE      = 16         # Samples per second
 SAMPLES_PER_READ = 1          # 1 = read/write/plot all match SAMPLE_RATE
 RECORD_DELAY     = 20         # Seconds to wait before writing to file (time to start MTS)
+TARE_SAMPLES     = 160        # Samples to average for tare baseline (160 = 10 seconds at 16 Hz)
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
 KPA_TO_KSI       = 0.000145038   # kPa → ksi conversion
 
@@ -81,10 +82,32 @@ def run_acquisition():
 
         print("Acquisition started... Press Ctrl+C to stop")
 
-        # Tare baselines (set on first read, from RAW values)
-        baseline_strain  = None
-        baseline_disp    = None  # raw voltage baselines for displacement
-        baseline_press_v = None  # raw voltage baselines for pressure
+        # ── Collect TARE_SAMPLES and average for accurate baseline ─
+        print(f"Collecting tare baseline ({TARE_SAMPLES} samples = "
+              f"{TARE_SAMPLES/SAMPLE_RATE:.0f}s)... keep sensors unloaded")
+        tare_strain  = [0.0] * 8
+        tare_disp    = [0.0] * 12
+        tare_press_v = [0.0, 0.0, 0.0, 0.0]
+        collected = 0
+        while collected < TARE_SAMPLES:
+            sd = strain_task.read(number_of_samples_per_channel=SAMPLES_PER_READ)
+            vd = voltage_task.read(number_of_samples_per_channel=SAMPLES_PER_READ)
+            n  = min(len(sd[0]), len(vd[0]), TARE_SAMPLES - collected)
+            for s in range(n):
+                for i in range(8):
+                    tare_strain[i]  += sd[i][s]
+                for i in range(12):
+                    tare_disp[i]    += vd[i][s]
+                tare_press_v[0] += vd[12][s]
+                tare_press_v[1] += vd[13][s]
+                tare_press_v[2] += vd[14][s]
+                tare_press_v[3] += vd[15][s]
+            collected += n
+
+        baseline_strain  = [round(v / TARE_SAMPLES, 6) for v in tare_strain]
+        baseline_disp    = [round(v / TARE_SAMPLES, 6) for v in tare_disp]
+        baseline_press_v = [round(v / TARE_SAMPLES, 6) for v in tare_press_v]
+        print(f"Tare complete. Baseline set to 6 decimal places.")
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -200,13 +223,7 @@ def run_acquisition():
                     v19 = voltage_data[14][s]
                     v20 = voltage_data[15][s]
 
-                    # Set baseline on first sample (raw values)
-                    if baseline_strain is None:
-                        baseline_strain  = strain_vals[:]
-                        baseline_disp    = disp_vals[:]
-                        baseline_press_v = [v17, v18, v19, v20]
-
-                    # Tare raw values first
+                    # Tare raw values (baseline already set from averaged TARE_SAMPLES)
                     strain_tared_raw = [strain_vals[i] - baseline_strain[i] for i in range(8)]
                     disp_tared_raw   = [disp_vals[i]   - baseline_disp[i]   for i in range(12)]
                     v17_t = v17 - baseline_press_v[0]
