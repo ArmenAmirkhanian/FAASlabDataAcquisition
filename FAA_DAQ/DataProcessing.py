@@ -83,11 +83,12 @@ def run_acquisition():
         print("Acquisition started... Press Ctrl+C to stop")
 
         # ── Collect TARE_SAMPLES and average for accurate baseline ─
+        # Convert first, then average — baselines are in final units (in, kPa, strain)
         print(f"Collecting tare baseline ({TARE_SAMPLES} samples = "
               f"{TARE_SAMPLES/SAMPLE_RATE:.0f}s)... keep sensors unloaded")
-        tare_strain  = [0.0] * 8
-        tare_disp    = [0.0] * 12
-        tare_press_v = [0.0, 0.0, 0.0, 0.0]
+        tare_strain   = [0.0] * 8
+        tare_disp_in  = [0.0] * 12   # accumulated disp in inches
+        tare_press_kpa = [0.0] * 4   # accumulated pressure in kPa
         collected = 0
         while collected < TARE_SAMPLES:
             sd = strain_task.read(number_of_samples_per_channel=SAMPLES_PER_READ)
@@ -95,19 +96,19 @@ def run_acquisition():
             n  = min(len(sd[0]), len(vd[0]), TARE_SAMPLES - collected)
             for s in range(n):
                 for i in range(8):
-                    tare_strain[i]  += sd[i][s]
+                    tare_strain[i]    += sd[i][s]
                 for i in range(12):
-                    tare_disp[i]    += vd[i][s]
-                tare_press_v[0] += vd[12][s]
-                tare_press_v[1] += vd[13][s]
-                tare_press_v[2] += vd[14][s]
-                tare_press_v[3] += vd[15][s]
+                    tare_disp_in[i]   += vd[i][s] * DISP_SCALE
+                tare_press_kpa[0] += process_soil_plate_pressure(vd[12][s])
+                tare_press_kpa[1] += process_agg_plate_pressure(vd[13][s])
+                tare_press_kpa[2] += process_soil_pore_water_pressure(vd[14][s])
+                tare_press_kpa[3] += process_agg_pore_water_pressure(vd[15][s])
             collected += n
 
-        baseline_strain  = [round(v / TARE_SAMPLES, 6) for v in tare_strain]
-        baseline_disp    = [round(v / TARE_SAMPLES, 6) for v in tare_disp]
-        baseline_press_v = [round(v / TARE_SAMPLES, 6) for v in tare_press_v]
-        print(f"Tare complete. Baseline set to 6 decimal places.")
+        baseline_strain   = [round(v / TARE_SAMPLES, 6) for v in tare_strain]
+        baseline_disp_in  = [round(v / TARE_SAMPLES, 6) for v in tare_disp_in]
+        baseline_press_kpa = [round(v / TARE_SAMPLES, 6) for v in tare_press_kpa]
+        print("Tare complete. Baseline set to 6 decimal places.")
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -216,70 +217,63 @@ def run_acquisition():
                 # ── Loop over all samples in this read batch ──────
                 n_samples = min(len(strain_data[0]), len(voltage_data[0]))
                 for s in range(n_samples):
-                    strain_vals = [strain_data[i][s]  for i in range(8)]
-                    disp_vals   = [voltage_data[i][s] for i in range(12)]
+                    # ── Step 1: Read raw values from hardware ─────
+                    strain_raw = [strain_data[i][s]  for i in range(8)]
+                    disp_raw   = [voltage_data[i][s] for i in range(12)]  # raw V
                     v17 = voltage_data[12][s]
                     v18 = voltage_data[13][s]
                     v19 = voltage_data[14][s]
                     v20 = voltage_data[15][s]
 
-                    # Tare raw values (baseline already set from averaged TARE_SAMPLES)
-                    strain_tared_raw = [strain_vals[i] - baseline_strain[i] for i in range(8)]
-                    disp_tared_raw   = [disp_vals[i]   - baseline_disp[i]   for i in range(12)]
-                    v17_t = v17 - baseline_press_v[0]
-                    v18_t = v18 - baseline_press_v[1]
-                    v19_t = v19 - baseline_press_v[2]
-                    v20_t = v20 - baseline_press_v[3]
-
-                    # Process tared raw values
-                    disp_proc  = [v * DISP_SCALE for v in disp_tared_raw]
-                    press_proc = [process_soil_plate_pressure(v17_t),
-                                  process_agg_plate_pressure(v18_t),
-                                  process_soil_pore_water_pressure(v19_t),
-                                  process_agg_pore_water_pressure(v20_t)]
-
-                    # Calibrated values (no taring — raw V → physical units)
-                    disp_cal  = [v * DISP_SCALE for v in disp_vals]
-                    press_cal = [process_soil_plate_pressure(v17),
+                    # ── Step 2: Convert raw to physical units (calibrated) ─
+                    disp_in  = [v * DISP_SCALE for v in disp_raw]         # V → inches
+                    press_kpa = [process_soil_plate_pressure(v17),         # V → kPa
                                  process_agg_plate_pressure(v18),
                                  process_soil_pore_water_pressure(v19),
                                  process_agg_pore_water_pressure(v20)]
 
-                    # ── Write to file only after delay has passed ─
-                    # Time is sample-index based: t = sample_count / SAMPLE_RATE
+                    # ── Step 3: Tare (subtract averaged baseline) ─────────
+                    strain_tared = [strain_raw[i] - baseline_strain[i]    for i in range(8)]
+                    disp_tared   = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
+                    press_tared_kpa = [press_kpa[i] - baseline_press_kpa[i] for i in range(4)]
+
+                    # ── Step 4: Convert tared pressure kPa → ksi ─────────
+                    press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
+
+                    # ── Write to file only after delay has passed ─────────
                     if elapsed_total >= RECORD_DELAY:
                         t = sample_count / SAMPLE_RATE
                         sample_count += 1
 
+                        # RAW: raw displacement voltage, raw pressure voltage, raw strain
                         raw_row = [f"{t:.6f}"] + \
-                                  [f"{v:.6f}" for v in disp_vals] + \
+                                  [f"{v:.6f}" for v in disp_raw] + \
                                   [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
-                                  [f"{v:.6f}" for v in strain_vals]
+                                  [f"{v:.6f}" for v in strain_raw]
                         raw_file.write("\t".join(raw_row) + "\n")
 
-                        press_proc_ksi = [max(0.0, v * KPA_TO_KSI) for v in press_proc]
-                        proc_row = [f"{t:.6f}"] + \
-                                   [f"{v:.6f}" for v in disp_proc] + \
-                                   [f"{v:.6f}" for v in press_proc_ksi] + \
-                                   [f"{v:.6f}" for v in strain_tared_raw]
-                        proc_file.write("\t".join(proc_row) + "\n")
-
-                        press_cal_clamped = [max(0.0, v) for v in press_cal]
+                        # CALIBRATED: converted displacement (in), converted pressure (kPa) — no taring
                         cal_row = [f"{t:.6f}"] + \
-                                  [f"{v:.6f}" for v in disp_cal] + \
-                                  [f"{v:.6f}" for v in press_cal_clamped]
+                                  [f"{v:.6f}" for v in disp_in] + \
+                                  [f"{v:.6f}" for v in press_kpa]
                         cal_file.write("\t".join(cal_row) + "\n")
 
-                    # ── Feed all samples to plot data ──
-                    press_proc_ksi_plot = [max(0.0, v * KPA_TO_KSI) for v in press_proc]
+                        # PROCESSED: tared displacement (in), tared pressure (ksi), tared strain
+                        proc_row = [f"{t:.6f}"] + \
+                                   [f"{v:.6f}" for v in disp_tared] + \
+                                   [f"{v:.6f}" for v in press_tared_ksi] + \
+                                   [f"{v:.6f}" for v in strain_tared]
+                        proc_file.write("\t".join(proc_row) + "\n")
+
+                    # ── Feed processed values to plot ─────────────────────
                     t_data.append(elapsed_total)
                     for i in range(8):
-                        strain_plot[i].append(strain_tared_raw[i])
+                        strain_plot[i].append(strain_tared[i])
                     for i in range(12):
-                        disp_plot[i].append(disp_proc[i])
+                        disp_plot[i].append(disp_tared[i])
                     for i in range(4):
-                        press_plot[i].append(press_proc_ksi_plot[i])
-                    b2bot_plot.append(disp_proc[6])
+                        press_plot[i].append(press_tared_ksi[i])
+                    b2bot_plot.append(disp_tared[6])
 
                 raw_file.flush()
                 proc_file.flush()
