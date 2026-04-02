@@ -13,8 +13,10 @@ import os
 # ─── CONFIGURATION ────────────────────────────────────────────
 VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
-SAMPLE_RATE      = 16         # Samples per second
-SAMPLES_PER_READ = 1          # 1 = read/write/plot all match SAMPLE_RATE
+SAMPLE_RATE      = 16         # Voltage/pressure effective sample rate (Hz)
+SAMPLES_PER_READ = 1          # Voltage samples per loop iteration
+STRAIN_HW_RATE   = 974        # NI-9235 minimum hardware sample rate (Hz)
+STRAIN_DOWNSAMPLE = round(STRAIN_HW_RATE / SAMPLE_RATE)  # 974/16 ≈ 61 — strain samples to average per voltage sample
 RECORD_DELAY     = 10         # Seconds to wait before writing to file (time to start MTS)
 TARE_SAMPLES     = 16        # Samples to average for tare baseline (160 = 10 seconds at 16 Hz)
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
@@ -77,7 +79,8 @@ def run_acquisition():
             )
 
         # -- Set sample rates --
-        strain_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+        # NI-9235 cannot go below 974 Hz — run at hardware minimum and downsample in software
+        strain_task.timing.cfg_samp_clk_timing(STRAIN_HW_RATE)
         voltage_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
 
         print("Acquisition started... Press Ctrl+C to stop")
@@ -187,9 +190,11 @@ def run_acquisition():
 
         try:
             while True:
-                # Read all channels
+                # Read voltage channels (16 Hz) and strain channels (974 Hz, then average)
+                # STRAIN_DOWNSAMPLE strain samples are collected per voltage sample
+                # and averaged to produce one strain value at the effective 16 Hz rate
                 strain_data  = strain_task.read(
-                    number_of_samples_per_channel=SAMPLES_PER_READ)
+                    number_of_samples_per_channel=STRAIN_DOWNSAMPLE)
                 voltage_data = voltage_task.read(
                     number_of_samples_per_channel=SAMPLES_PER_READ)
 
@@ -198,11 +203,12 @@ def run_acquisition():
 
                 elapsed_total = (datetime.now() - start_time).total_seconds()
 
-                # ── Loop over all samples in this read batch ──────
-                n_samples = min(len(strain_data[0]), len(voltage_data[0]))
+                # ── Loop over voltage samples (1 per iteration at 16 Hz) ──
+                n_samples = len(voltage_data[0])
                 for s in range(n_samples):
                     # ── Step 1: Read raw values from hardware ─────
-                    strain_raw = [strain_data[i][s]  for i in range(8)]
+                    # Strain: average all STRAIN_DOWNSAMPLE hardware samples → 1 value at 16 Hz
+                    strain_raw = [sum(strain_data[i]) / STRAIN_DOWNSAMPLE for i in range(8)]
                     disp_raw   = [voltage_data[i][s] for i in range(12)]
                     v17 = voltage_data[12][s]
                     v18 = voltage_data[13][s]
