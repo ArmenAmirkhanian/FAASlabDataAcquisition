@@ -15,8 +15,8 @@ VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
 SAMPLE_RATE      = 16         # Samples per second
 SAMPLES_PER_READ = 1          # 1 = read/write/plot all match SAMPLE_RATE
-RECORD_DELAY     = 20         # Seconds to wait before writing to file (time to start MTS)
-TARE_SAMPLES     = 160        # Samples to average for tare baseline (160 = 10 seconds at 16 Hz)
+RECORD_DELAY     = 10         # Seconds to wait before writing to file (time to start MTS)
+TARE_SAMPLES     = 16        # Samples to average for tare baseline (160 = 10 seconds at 16 Hz)
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
 KPA_TO_KSI       = 0.000145038   # kPa → ksi conversion
 
