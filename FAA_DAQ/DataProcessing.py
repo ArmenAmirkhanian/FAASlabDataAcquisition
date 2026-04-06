@@ -4,6 +4,7 @@ from nidaqmx.constants import (BridgeConfiguration,
                                 StrainGageBridgeType,
                                 TerminalConfiguration)
 from datetime import datetime
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 import tkinter as tk
@@ -13,12 +14,11 @@ import os
 # ─── CONFIGURATION ────────────────────────────────────────────
 VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
-SAMPLE_RATE      = 16         # Voltage/pressure effective sample rate (Hz)
-SAMPLES_PER_READ = 1          # Voltage samples per loop iteration
-STRAIN_HW_RATE   = 974        # NI-9235 minimum hardware sample rate (Hz)
-STRAIN_DOWNSAMPLE = round(STRAIN_HW_RATE / SAMPLE_RATE)  # 974/16 ≈ 61 — strain samples to average per voltage sample
-RECORD_DELAY     = 10         # Seconds to wait before writing to file (time to start MTS)
-TARE_SAMPLES     = 16        # Samples to average for tare baseline (160 = 10 seconds at 16 Hz)
+SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
+HW_RATE          = 974        # Hardware clock rate for both tasks (NI-9235 minimum)
+DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 974/16 ≈ 61 — samples averaged per output sample
+WALK_COUNTDOWN   = 10         # Seconds countdown before recording — time to walk to MTS
+RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
 KPA_TO_KSI       = 0.000145038   # kPa → ksi conversion
 
@@ -78,24 +78,37 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates --
-        # NI-9235 cannot go below 974 Hz — run at hardware minimum and downsample in software
-        strain_task.timing.cfg_samp_clk_timing(STRAIN_HW_RATE)
-        voltage_task.timing.cfg_samp_clk_timing(SAMPLE_RATE)
+        # -- Set sample rates (shared clock) --
+        # Strain task runs as master at 974 Hz (NI-9235 hardware minimum)
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE)
+        # Voltage task slaves to strain module's sample clock — hardware-level sync
+        # Both tasks now share the exact same clock pulse; zero drift over 11.5 day test
+        voltage_task.timing.cfg_samp_clk_timing(
+            HW_RATE,
+            source=f"/{STRAIN_MODULE}/SampleClock"
+        )
 
-        print("Acquisition started... Press Ctrl+C to stop")
-        print(f"Waiting {RECORD_DELAY}s before tare — start MTS machine now...")
+        # ── 10s countdown — walk to MTS during this time ─────────
+        print("Acquisition started. Walk to MTS now...")
+        for i in range(WALK_COUNTDOWN, 0, -1):
+            print(f"\r  Starting in {i}s... ", end="", flush=True)
+            time.sleep(1)
+        print("\rRecording started — start MTS ramp now!          ")
+        start_time = datetime.now()   # t=0 begins after countdown
 
-        # Baselines set after delay + tare collection
+        # Baselines set from ramp data — None until ramp completes
         baseline_strain    = None
         baseline_disp_in   = None
         baseline_press_kpa = None
 
-        # Tare accumulators
-        tare_strain    = [0.0] * 8
-        tare_disp_in   = [0.0] * 12
-        tare_press_kpa = [0.0] * 4
-        tare_collected = 0
+        # Ramp tare accumulators
+        ramp_strain    = [0.0] * 8
+        ramp_disp_in   = [0.0] * 12
+        ramp_press_kpa = [0.0] * 4
+        ramp_collected = 0
+
+        # Buffer for processed rows during ramp (can't tare until ramp ends)
+        proc_buffer = []
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -185,102 +198,111 @@ def run_acquisition():
 
         plt.tight_layout()
         plt.show(block=False)
-        start_time   = None
-        sample_count = 0   # counts written samples; time = sample_count / SAMPLE_RATE
-
         try:
             while True:
                 # Read voltage channels (16 Hz) and strain channels (974 Hz, then average)
                 # STRAIN_DOWNSAMPLE strain samples are collected per voltage sample
                 # and averaged to produce one strain value at the effective 16 Hz rate
                 strain_data  = strain_task.read(
-                    number_of_samples_per_channel=STRAIN_DOWNSAMPLE)
+                    number_of_samples_per_channel=DOWNSAMPLE)
                 voltage_data = voltage_task.read(
-                    number_of_samples_per_channel=SAMPLES_PER_READ)
+                    number_of_samples_per_channel=DOWNSAMPLE)
 
-                if start_time is None:
-                    start_time = datetime.now()
 
-                elapsed_total = (datetime.now() - start_time).total_seconds()
+                # Both tasks read DOWNSAMPLE=61 samples per loop at 974 Hz (shared clock)
+                # Average all 61 → 1 output value per channel at effective 16 Hz
+                strain_raw = [sum(strain_data[i])  / DOWNSAMPLE for i in range(8)]
+                disp_raw   = [sum(voltage_data[i]) / DOWNSAMPLE for i in range(12)]
+                v17 = sum(voltage_data[12]) / DOWNSAMPLE
+                v18 = sum(voltage_data[13]) / DOWNSAMPLE
+                v19 = sum(voltage_data[14]) / DOWNSAMPLE
+                v20 = sum(voltage_data[15]) / DOWNSAMPLE
 
-                # ── Loop over voltage samples (1 per iteration at 16 Hz) ──
-                n_samples = len(voltage_data[0])
-                for s in range(n_samples):
-                    # ── Step 1: Read raw values from hardware ─────
-                    # Strain: average all STRAIN_DOWNSAMPLE hardware samples → 1 value at 16 Hz
-                    strain_raw = [sum(strain_data[i]) / STRAIN_DOWNSAMPLE for i in range(8)]
-                    disp_raw   = [voltage_data[i][s] for i in range(12)]
-                    v17 = voltage_data[12][s]
-                    v18 = voltage_data[13][s]
-                    v19 = voltage_data[14][s]
-                    v20 = voltage_data[15][s]
+                # ── Step 2: Convert raw to physical units ─────────
+                disp_in   = [v * DISP_SCALE for v in disp_raw]
+                press_kpa = [process_soil_plate_pressure(v17),
+                             process_agg_plate_pressure(v18),
+                             process_soil_pore_water_pressure(v19),
+                             process_agg_pore_water_pressure(v20)]
 
-                    # ── Step 2: Convert raw to physical units ─────
-                    disp_in   = [v * DISP_SCALE for v in disp_raw]
-                    press_kpa = [process_soil_plate_pressure(v17),
-                                 process_agg_plate_pressure(v18),
-                                 process_soil_pore_water_pressure(v19),
-                                 process_agg_pore_water_pressure(v20)]
+                # ── Phase A: collect ramp samples for baseline ────
+                if ramp_collected < RAMP_SAMPLES:
+                    for i in range(8):
+                        ramp_strain[i]    += strain_raw[i]
+                    for i in range(12):
+                        ramp_disp_in[i]   += disp_in[i]
+                    ramp_press_kpa[0] += press_kpa[0]
+                    ramp_press_kpa[1] += press_kpa[1]
+                    ramp_press_kpa[2] += press_kpa[2]
+                    ramp_press_kpa[3] += press_kpa[3]
+                    ramp_collected += 1
 
-                    # ── Phase A: still in delay — just plot, no tare, no file ─
-                    if elapsed_total < RECORD_DELAY:
-                        remaining = RECORD_DELAY - elapsed_total
-                        if s == 0:
-                            print(f"\r[WAITING — recording starts in {remaining:.1f}s]", end="")
-                        continue   # skip tare collection and file writing
-
-                    # ── Phase B: collecting tare samples after delay ───────
-                    if tare_collected < TARE_SAMPLES:
-                        for i in range(8):
-                            tare_strain[i]    += strain_raw[i]
-                        for i in range(12):
-                            tare_disp_in[i]   += disp_in[i]
-                        tare_press_kpa[0] += press_kpa[0]
-                        tare_press_kpa[1] += press_kpa[1]
-                        tare_press_kpa[2] += press_kpa[2]
-                        tare_press_kpa[3] += press_kpa[3]
-                        tare_collected += 1
-                        if tare_collected == TARE_SAMPLES:
-                            baseline_strain    = [round(v / TARE_SAMPLES, 6) for v in tare_strain]
-                            baseline_disp_in   = [round(v / TARE_SAMPLES, 6) for v in tare_disp_in]
-                            baseline_press_kpa = [round(v / TARE_SAMPLES, 6) for v in tare_press_kpa]
-                            print(f"\nTare complete ({TARE_SAMPLES} samples). Recording started.")
-                        continue   # skip file writing until baseline is ready
-
-                    # ── Phase C: baseline ready — tare, write, plot ────────
-                    strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(8)]
-                    disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
-                    press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
-                    press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
-
-                    t = sample_count / SAMPLE_RATE
-                    sample_count += 1
-
+                    # Write raw and calibrated immediately
+                    t = (datetime.now() - start_time).total_seconds()
                     raw_row = [f"{t:.6f}"] + \
                               [f"{v:.6f}" for v in disp_raw] + \
                               [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
                               [f"{v:.6f}" for v in strain_raw]
                     raw_file.write("\t".join(raw_row) + "\n")
-
                     cal_row = [f"{t:.6f}"] + \
                               [f"{v:.6f}" for v in disp_in] + \
                               [f"{v:.6f}" for v in press_kpa]
                     cal_file.write("\t".join(cal_row) + "\n")
 
-                    proc_row = [f"{t:.6f}"] + \
-                               [f"{v:.6f}" for v in disp_tared] + \
-                               [f"{v:.6f}" for v in press_tared_ksi] + \
-                               [f"{v:.6f}" for v in strain_tared]
-                    proc_file.write("\t".join(proc_row) + "\n")
+                    # Buffer processed row (no baseline yet)
+                    proc_buffer.append((t, disp_in[:], press_kpa[:], strain_raw[:]))
 
-                    t_data.append(t)
-                    for i in range(8):
-                        strain_plot[i].append(strain_tared[i])
-                    for i in range(12):
-                        disp_plot[i].append(disp_tared[i])
-                    for i in range(4):
-                        press_plot[i].append(press_tared_ksi[i])
-                    b2bot_plot.append(disp_tared[6])
+                    # Once ramp complete → lock baseline, flush buffered processed rows
+                    if ramp_collected == RAMP_SAMPLES:
+                        baseline_strain    = [round(v / RAMP_SAMPLES, 6) for v in ramp_strain]
+                        baseline_disp_in   = [round(v / RAMP_SAMPLES, 6) for v in ramp_disp_in]
+                        baseline_press_kpa = [round(v / RAMP_SAMPLES, 6) for v in ramp_press_kpa]
+                        print(f"\nRamp complete. Baseline set at 1 kip. Cyclic recording started.")
+                        for (bt, bd, bp, bs) in proc_buffer:
+                            d_tared = [bd[i] - baseline_disp_in[i]   for i in range(12)]
+                            p_tared = [(bp[i] - baseline_press_kpa[i]) * KPA_TO_KSI for i in range(4)]
+                            s_tared = [bs[i] - baseline_strain[i]    for i in range(8)]
+                            proc_row = [f"{bt:.6f}"] + \
+                                       [f"{v:.6f}" for v in d_tared] + \
+                                       [f"{v:.6f}" for v in p_tared] + \
+                                       [f"{v:.6f}" for v in s_tared]
+                            proc_file.write("\t".join(proc_row) + "\n")
+                        proc_buffer.clear()
+                    continue
+
+                # ── Phase B: cyclic recording — baseline ready ────
+                strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(8)]
+                disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
+                press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
+                press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
+
+                t = (datetime.now() - start_time).total_seconds()
+
+                raw_row = [f"{t:.6f}"] + \
+                          [f"{v:.6f}" for v in disp_raw] + \
+                          [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
+                          [f"{v:.6f}" for v in strain_raw]
+                raw_file.write("\t".join(raw_row) + "\n")
+
+                cal_row = [f"{t:.6f}"] + \
+                          [f"{v:.6f}" for v in disp_in] + \
+                          [f"{v:.6f}" for v in press_kpa]
+                cal_file.write("\t".join(cal_row) + "\n")
+
+                proc_row = [f"{t:.6f}"] + \
+                           [f"{v:.6f}" for v in disp_tared] + \
+                           [f"{v:.6f}" for v in press_tared_ksi] + \
+                           [f"{v:.6f}" for v in strain_tared]
+                proc_file.write("\t".join(proc_row) + "\n")
+
+                t_data.append(t)
+                for i in range(8):
+                    strain_plot[i].append(strain_tared[i])
+                for i in range(12):
+                    disp_plot[i].append(disp_tared[i])
+                for i in range(4):
+                    press_plot[i].append(press_tared_ksi[i])
+                b2bot_plot.append(disp_tared[6])
 
                 raw_file.flush()
                 proc_file.flush()
