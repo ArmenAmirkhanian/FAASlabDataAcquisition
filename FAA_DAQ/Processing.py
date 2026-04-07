@@ -16,7 +16,7 @@ VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
 HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
-DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
+MIN_SAMPLES      = 30         # Minimum samples to average — avoids noisy micro-reads
 WALK_COUNTDOWN   = 10         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
@@ -78,10 +78,13 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates — large buffer (10s) to absorb plotting/IO delays --
-        # NI-9235 does not expose SampleClock; both tasks run independently
+        # -- Set sample rates — both tasks run independently at HW_RATE --
         strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
         voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
+
+        # Start slave before master so the shared clock is ready
+        voltage_task.start()
+        strain_task.start()
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
@@ -89,7 +92,9 @@ def run_acquisition():
             print(f"\r  Starting in {i}s... ", end="", flush=True)
             time.sleep(1)
         print("\rRecording started — start MTS ramp now!          ")
-        start_time = datetime.now()   # t=0 begins after countdown
+
+        # Sample-count-based timestamp (no wall-clock drift)
+        total_hw_samples = 0
 
         # Baselines set from ramp data — None until ramp completes
         baseline_strain    = None
@@ -104,12 +109,6 @@ def run_acquisition():
 
         # Buffer for processed rows during ramp (can't tare until ramp ends)
         proc_buffer = []
-        plot_counter = 0
-
-        # Auto-zero detection: skip samples where any displacement channel
-        # jumps more than this threshold in one sample (NI-9235 calibration artifact)
-        AUTOZERO_THRESHOLD = 0.3   # volts — any jump larger than this is flagged
-        prev_disp_raw = None       # updated only on accepted samples
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -199,32 +198,34 @@ def run_acquisition():
 
         plt.tight_layout()
         plt.show(block=False)
+
+        plot_counter = 0  # Throttle plot updates to once per second
+
         try:
             while True:
-                # Read voltage channels (16 Hz) and strain channels (974 Hz, then average)
-                # STRAIN_DOWNSAMPLE strain samples are collected per voltage sample
-                # and averaged to produce one strain value at the effective 16 Hz rate
+                # ── Read however many samples are available in both tasks ─
+                n_available = min(strain_task.in_stream.avail_samp_per_chan,
+                                  voltage_task.in_stream.avail_samp_per_chan)
+                if n_available < MIN_SAMPLES:
+                    time.sleep(0.01)  # Brief sleep to avoid busy-waiting
+                    continue
+
                 strain_data  = strain_task.read(
-                    number_of_samples_per_channel=DOWNSAMPLE)
+                    number_of_samples_per_channel=n_available)
                 voltage_data = voltage_task.read(
-                    number_of_samples_per_channel=DOWNSAMPLE)
+                    number_of_samples_per_channel=n_available)
 
+                # Average all available samples → 1 output value per channel
+                strain_raw = [sum(strain_data[i])  / n_available for i in range(8)]
+                disp_raw   = [sum(voltage_data[i]) / n_available for i in range(12)]
+                v17 = sum(voltage_data[12]) / n_available
+                v18 = sum(voltage_data[13]) / n_available
+                v19 = sum(voltage_data[14]) / n_available
+                v20 = sum(voltage_data[15]) / n_available
 
-                # Both tasks read DOWNSAMPLE=61 samples per loop at 974 Hz (shared clock)
-                # Average all 61 → 1 output value per channel at effective 16 Hz
-                strain_raw = [sum(strain_data[i])  / DOWNSAMPLE for i in range(8)]
-                disp_raw   = [sum(voltage_data[i]) / DOWNSAMPLE for i in range(12)]
-                v17 = sum(voltage_data[12]) / DOWNSAMPLE
-                v18 = sum(voltage_data[13]) / DOWNSAMPLE
-                v19 = sum(voltage_data[14]) / DOWNSAMPLE
-                v20 = sum(voltage_data[15]) / DOWNSAMPLE
-
-                # ── Auto-zero detection: skip NI-9235 calibration glitches ──
-                if prev_disp_raw is not None:
-                    if any(abs(disp_raw[i] - prev_disp_raw[i]) > AUTOZERO_THRESHOLD
-                           for i in range(12)):
-                        continue   # discard this sample entirely
-                prev_disp_raw = disp_raw
+                # Track hardware samples for drift-free timestamp
+                total_hw_samples += n_available
+                t = total_hw_samples / HW_RATE
 
                 # ── Step 2: Convert raw to physical units ─────────
                 disp_in   = [v * DISP_SCALE for v in disp_raw]
@@ -246,7 +247,6 @@ def run_acquisition():
                     ramp_collected += 1
 
                     # Write raw and calibrated immediately
-                    t = (datetime.now() - start_time).total_seconds()
                     raw_row = [f"{t:.6f}"] + \
                               [f"{v:.6f}" for v in disp_raw] + \
                               [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
@@ -284,8 +284,6 @@ def run_acquisition():
                 press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
                 press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
 
-                t = (datetime.now() - start_time).total_seconds()
-
                 raw_row = [f"{t:.6f}"] + \
                           [f"{v:.6f}" for v in disp_raw] + \
                           [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
@@ -316,7 +314,7 @@ def run_acquisition():
                 proc_file.flush()
                 cal_file.flush()
 
-                # ── Refresh plots once per second (every SAMPLE_RATE loops) ──
+                # ── Refresh plots once per ~1 second ──────────────
                 plot_counter += 1
                 if plot_counter >= SAMPLE_RATE:
                     plot_counter = 0
@@ -337,6 +335,8 @@ def run_acquisition():
 
         except KeyboardInterrupt:
             print("\nAcquisition stopped.")
+            strain_task.stop()
+            voltage_task.stop()
             raw_file.close()
             proc_file.close()
             cal_file.close()
