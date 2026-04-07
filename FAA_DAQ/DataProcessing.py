@@ -16,7 +16,7 @@ VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
 HW_RATE          = 974        # Hardware clock rate for both tasks (NI-9235 minimum)
-DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 974/16 ≈ 61 — samples averaged per output sample
+MIN_SAMPLES      = 30         # Minimum samples to average — avoids noisy micro-reads
 WALK_COUNTDOWN   = 10         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
@@ -79,10 +79,7 @@ def run_acquisition():
             )
 
         # -- Set sample rates (shared clock) --
-        # Strain task runs as master at 974 Hz (NI-9235 hardware minimum)
         strain_task.timing.cfg_samp_clk_timing(HW_RATE)
-        # Voltage task slaves to strain module's sample clock — hardware-level sync
-        # Both tasks now share the exact same clock pulse; zero drift over 11.5 day test
         voltage_task.timing.cfg_samp_clk_timing(
             HW_RATE,
             source=f"/{STRAIN_MODULE}/SampleClock"
@@ -94,7 +91,9 @@ def run_acquisition():
             print(f"\r  Starting in {i}s... ", end="", flush=True)
             time.sleep(1)
         print("\rRecording started — start MTS ramp now!          ")
-        start_time = datetime.now()   # t=0 begins after countdown
+
+        # Sample-count-based timestamp (no wall-clock drift)
+        total_hw_samples = 0
 
         # Baselines set from ramp data — None until ramp completes
         baseline_strain    = None
@@ -198,25 +197,33 @@ def run_acquisition():
 
         plt.tight_layout()
         plt.show(block=False)
+
+        plot_counter = 0  # Throttle plot updates to once per second
+
         try:
             while True:
-                # Read voltage channels (16 Hz) and strain channels (974 Hz, then average)
-                # STRAIN_DOWNSAMPLE strain samples are collected per voltage sample
-                # and averaged to produce one strain value at the effective 16 Hz rate
+                # ── Read however many samples are available ───────
+                n_available = strain_task.in_stream.avail_samp_per_chan
+                if n_available < MIN_SAMPLES:
+                    time.sleep(0.01)  # Brief sleep to avoid busy-waiting
+                    continue
+
                 strain_data  = strain_task.read(
-                    number_of_samples_per_channel=DOWNSAMPLE)
+                    number_of_samples_per_channel=n_available)
                 voltage_data = voltage_task.read(
-                    number_of_samples_per_channel=DOWNSAMPLE)
+                    number_of_samples_per_channel=n_available)
 
+                # Average all available samples → 1 output value per channel
+                strain_raw = [sum(strain_data[i])  / n_available for i in range(8)]
+                disp_raw   = [sum(voltage_data[i]) / n_available for i in range(12)]
+                v17 = sum(voltage_data[12]) / n_available
+                v18 = sum(voltage_data[13]) / n_available
+                v19 = sum(voltage_data[14]) / n_available
+                v20 = sum(voltage_data[15]) / n_available
 
-                # Both tasks read DOWNSAMPLE=61 samples per loop at 974 Hz (shared clock)
-                # Average all 61 → 1 output value per channel at effective 16 Hz
-                strain_raw = [sum(strain_data[i])  / DOWNSAMPLE for i in range(8)]
-                disp_raw   = [sum(voltage_data[i]) / DOWNSAMPLE for i in range(12)]
-                v17 = sum(voltage_data[12]) / DOWNSAMPLE
-                v18 = sum(voltage_data[13]) / DOWNSAMPLE
-                v19 = sum(voltage_data[14]) / DOWNSAMPLE
-                v20 = sum(voltage_data[15]) / DOWNSAMPLE
+                # Track hardware samples for drift-free timestamp
+                total_hw_samples += n_available
+                t = total_hw_samples / HW_RATE
 
                 # ── Step 2: Convert raw to physical units ─────────
                 disp_in   = [v * DISP_SCALE for v in disp_raw]
@@ -238,7 +245,6 @@ def run_acquisition():
                     ramp_collected += 1
 
                     # Write raw and calibrated immediately
-                    t = (datetime.now() - start_time).total_seconds()
                     raw_row = [f"{t:.6f}"] + \
                               [f"{v:.6f}" for v in disp_raw] + \
                               [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
@@ -276,8 +282,6 @@ def run_acquisition():
                 press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
                 press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
 
-                t = (datetime.now() - start_time).total_seconds()
-
                 raw_row = [f"{t:.6f}"] + \
                           [f"{v:.6f}" for v in disp_raw] + \
                           [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
@@ -308,20 +312,23 @@ def run_acquisition():
                 proc_file.flush()
                 cal_file.flush()
 
-                # ── Refresh plots once per batch ──────────────────
-                for i, line in enumerate(strain_lines):
-                    line.set_data(t_data, smooth(strain_plot[i]))
-                for i, line in enumerate(disp_lines):
-                    line.set_data(t_data, smooth(disp_plot[i]))
-                for i, line in enumerate(press_lines):
-                    line.set_data(t_data, smooth(press_plot[i]))
-                soil_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[0]))
-                agg_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[1]))
+                # ── Refresh plots once per ~1 second ──────────────
+                plot_counter += 1
+                if plot_counter >= SAMPLE_RATE:
+                    plot_counter = 0
+                    for i, line in enumerate(strain_lines):
+                        line.set_data(t_data, smooth(strain_plot[i]))
+                    for i, line in enumerate(disp_lines):
+                        line.set_data(t_data, smooth(disp_plot[i]))
+                    for i, line in enumerate(press_lines):
+                        line.set_data(t_data, smooth(press_plot[i]))
+                    soil_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[0]))
+                    agg_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[1]))
 
-                for ax in [ax1, ax2, ax3, ax4]:
-                    ax.relim()
-                    ax.autoscale_view()
-                plt.pause(0.001)
+                    for ax in [ax1, ax2, ax3, ax4]:
+                        ax.relim()
+                        ax.autoscale_view()
+                    plt.pause(0.001)
 
 
         except KeyboardInterrupt:
