@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import messagebox
 import os
+from collections import deque
 
 # ─── CONFIGURATION ────────────────────────────────────────────
 VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
@@ -89,12 +90,14 @@ def run_acquisition():
             print(f"\r  Starting in {i}s... ", end="", flush=True)
             time.sleep(1)
         print("\rRecording started — start MTS ramp now!          ")
-        start_time = datetime.now()   # t=0 begins after countdown
 
         # Baselines set from ramp data — None until ramp completes
         baseline_strain    = None
         baseline_disp_in   = None
         baseline_press_kpa = None
+
+        # Sample counter for drift-free timestamps starting at t=0
+        output_sample_count = 0
 
         # Ramp tare accumulators
         ramp_strain    = [0.0] * 8
@@ -160,12 +163,20 @@ def run_acquisition():
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8))
         fig.suptitle("Live DAQ Data")
 
-        # Data storage lists
-        t_data          = []
-        strain_plot     = [[] for _ in range(8)]
-        disp_plot       = [[] for _ in range(12)]
-        press_plot      = [[] for _ in range(4)]
-        b2bot_plot      = []   # DCDT_Left_Slab_B2_Bot (disp index 6)
+        # Rolling window for live plots — last 1 hour of data
+        PLOT_WINDOW = 3600 * SAMPLE_RATE   # 57,600 points at 16 Hz
+        t_data      = deque(maxlen=PLOT_WINDOW)
+        strain_plot = [deque(maxlen=PLOT_WINDOW) for _ in range(8)]
+        disp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(12)]
+        press_plot  = [deque(maxlen=PLOT_WINDOW) for _ in range(4)]
+        b2bot_plot  = deque(maxlen=PLOT_WINDOW)
+
+        # Full dataset retained in memory for end-of-test plot saves
+        t_full      = []
+        strain_full = [[] for _ in range(8)]
+        disp_full   = [[] for _ in range(12)]
+        press_full  = [[] for _ in range(4)]
+        b2bot_full  = []
 
         # Plot 1: Time vs Strain (tared)
         ax1.set_title("Strain (tared)")
@@ -246,7 +257,8 @@ def run_acquisition():
                     ramp_collected += 1
 
                     # Write raw and calibrated immediately
-                    t = (datetime.now() - start_time).total_seconds()
+                    output_sample_count += 1
+                    t = output_sample_count / SAMPLE_RATE
                     raw_row = [f"{t:.6f}"] + \
                               [f"{v:.6f}" for v in disp_raw] + \
                               [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
@@ -284,7 +296,8 @@ def run_acquisition():
                 press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
                 press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
 
-                t = (datetime.now() - start_time).total_seconds()
+                output_sample_count += 1
+                t = output_sample_count / SAMPLE_RATE
 
                 raw_row = [f"{t:.6f}"] + \
                           [f"{v:.6f}" for v in disp_raw] + \
@@ -304,13 +317,18 @@ def run_acquisition():
                 proc_file.write("\t".join(proc_row) + "\n")
 
                 t_data.append(t)
+                t_full.append(t)
                 for i in range(8):
                     strain_plot[i].append(strain_tared[i])
+                    strain_full[i].append(strain_tared[i])
                 for i in range(12):
                     disp_plot[i].append(disp_tared[i])
+                    disp_full[i].append(disp_tared[i])
                 for i in range(4):
                     press_plot[i].append(press_tared_ksi[i])
+                    press_full[i].append(press_tared_ksi[i])
                 b2bot_plot.append(disp_tared[6])
+                b2bot_full.append(disp_tared[6])
 
                 raw_file.flush()
                 proc_file.flush()
@@ -368,6 +386,20 @@ def run_acquisition():
                 "Do you want to save the live plots as PNG images?"
             )
             if save_plots:
+                # Redraw all axes with full dataset before saving
+                for i, line in enumerate(strain_lines):
+                    line.set_data(t_full, smooth(strain_full[i]))
+                for i, line in enumerate(disp_lines):
+                    line.set_data(t_full, smooth(disp_full[i]))
+                for i, line in enumerate(press_lines):
+                    line.set_data(t_full, smooth(press_full[i]))
+                soil_plate_line.set_data(smooth(b2bot_full), smooth(press_full[0]))
+                agg_plate_line.set_data(smooth(b2bot_full), smooth(press_full[1]))
+                for ax in [ax1, ax2, ax3, ax4]:
+                    ax.relim()
+                    ax.autoscale_view()
+                fig.canvas.draw()
+
                 plot_info = [
                     (ax1, "plot_strain"),
                     (ax2, "plot_displacement"),
