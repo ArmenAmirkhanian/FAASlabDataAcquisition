@@ -15,8 +15,8 @@ import os
 VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
-HW_RATE          = 974        # Hardware clock rate for both tasks (NI-9235 minimum)
-DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 974/16 ≈ 61 — samples averaged per output sample
+HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
+DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
 WALK_COUNTDOWN   = 10         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
@@ -78,15 +78,10 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates (shared clock) --
-        # Strain task runs as master at 974 Hz (NI-9235 hardware minimum)
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE)
-        # Voltage task slaves to strain module's sample clock — hardware-level sync
-        # Both tasks now share the exact same clock pulse; zero drift over 11.5 day test
-        voltage_task.timing.cfg_samp_clk_timing(
-            HW_RATE,
-            source=f"/{STRAIN_MODULE}/SampleClock"
-        )
+        # -- Set sample rates — large buffer (10s) to absorb plotting/IO delays --
+        # NI-9235 does not expose SampleClock; both tasks run independently
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
+        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
@@ -109,6 +104,7 @@ def run_acquisition():
 
         # Buffer for processed rows during ramp (can't tare until ramp ends)
         proc_buffer = []
+        plot_counter = 0
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -308,20 +304,23 @@ def run_acquisition():
                 proc_file.flush()
                 cal_file.flush()
 
-                # ── Refresh plots once per batch ──────────────────
-                for i, line in enumerate(strain_lines):
-                    line.set_data(t_data, smooth(strain_plot[i]))
-                for i, line in enumerate(disp_lines):
-                    line.set_data(t_data, smooth(disp_plot[i]))
-                for i, line in enumerate(press_lines):
-                    line.set_data(t_data, smooth(press_plot[i]))
-                soil_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[0]))
-                agg_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[1]))
+                # ── Refresh plots once per second (every SAMPLE_RATE loops) ──
+                plot_counter += 1
+                if plot_counter >= SAMPLE_RATE:
+                    plot_counter = 0
+                    for i, line in enumerate(strain_lines):
+                        line.set_data(t_data, smooth(strain_plot[i]))
+                    for i, line in enumerate(disp_lines):
+                        line.set_data(t_data, smooth(disp_plot[i]))
+                    for i, line in enumerate(press_lines):
+                        line.set_data(t_data, smooth(press_plot[i]))
+                    soil_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[0]))
+                    agg_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[1]))
 
-                for ax in [ax1, ax2, ax3, ax4]:
-                    ax.relim()
-                    ax.autoscale_view()
-                plt.pause(0.001)
+                    for ax in [ax1, ax2, ax3, ax4]:
+                        ax.relim()
+                        ax.autoscale_view()
+                    plt.pause(0.001)
 
 
         except KeyboardInterrupt:
