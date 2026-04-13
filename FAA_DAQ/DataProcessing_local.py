@@ -108,11 +108,14 @@ def run_acquisition():
         # Buffer for processed rows during ramp (can't tare until ramp ends)
         proc_buffer = []
         plot_counter = 0
+<<<<<<< HEAD
+=======
 
         # Auto-zero detection: skip samples where any displacement channel
         # jumps more than this threshold in one sample (NI-9235 calibration artifact)
         AUTOZERO_THRESHOLD = 0.3   # volts — any jump larger than this is flagged
         prev_disp_raw = None       # updated only on accepted samples
+>>>>>>> 939a057e957433256017692178d5b243dd9b46eb
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
