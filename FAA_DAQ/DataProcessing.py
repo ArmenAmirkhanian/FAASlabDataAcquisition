@@ -21,7 +21,7 @@ DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples ave
 WALK_COUNTDOWN   = 10         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
-KPA_TO_KSI       = 0.000145038   # kPa → ksi conversion
+KPA_TO_PSI       = 0.145038      # kPa → psi conversion
 
 # ─── PRESSURE CONVERSION FORMULAS (one per channel) ──────────
 def process_soil_plate_pressure(raw):
@@ -144,8 +144,8 @@ def run_acquisition():
         proc_header = (
             ["time_s"] +
             disp_names +
-            ["soil_plate_pressure_ksi", "agg_plate_pressure_ksi",
-             "soil_pore_water_pressure_ksi", "agg_pore_water_pressure_ksi"] +
+            ["soil_plate_pressure_psi", "agg_plate_pressure_psi",
+             "soil_pore_water_pressure_psi", "agg_pore_water_pressure_psi"] +
             strain_names
         )
         cal_header = (
@@ -192,20 +192,20 @@ def run_acquisition():
         disp_lines = [ax2.plot([], [], label=disp_names[i])[0] for i in range(12)]
         ax2.legend(fontsize=6, loc="upper left")
 
-        # Plot 3: Time vs Pressure (processed, ksi)
+        # Plot 3: Time vs Pressure (processed, psi)
         press_labels = ["Soil Plate", "Agg Plate", "Soil Pore Water", "Agg Pore Water"]
         ax3.set_title("Pressure - Processed")
         ax3.set_xlabel("Time (s)")
-        ax3.set_ylabel("Pressure (ksi)")
+        ax3.set_ylabel("Pressure (psi)")
         press_lines = [ax3.plot([], [], label=press_labels[i])[0] for i in range(4)]
         ax3.legend(fontsize=7, loc="upper left")
 
-        # Plot 4: Pressure (ksi) vs Displacement (in)
+        # Plot 4: Pressure (psi) vs Displacement (in)
         ax4.set_title("Pressure vs DCDT_Left_Slab_B2_Bot")
         ax4.set_xlabel("DCDT_Left_Slab_B2_Bot (in)")
-        ax4.set_ylabel("Pressure (ksi)")
-        soil_plate_line, = ax4.plot([], [], label="Soil Plate Pressure (ksi)")
-        agg_plate_line,  = ax4.plot([], [], label="Agg Plate Pressure (ksi)")
+        ax4.set_ylabel("Pressure (psi)")
+        soil_plate_line, = ax4.plot([], [], label="Soil Plate Pressure (psi)")
+        agg_plate_line,  = ax4.plot([], [], label="Agg Plate Pressure (psi)")
         ax4.legend(fontsize=7, loc="upper left")
 
         plt.tight_layout()
@@ -239,10 +239,11 @@ def run_acquisition():
 
                 # ── Step 2: Convert raw to physical units ─────────
                 disp_in   = [v * DISP_SCALE for v in disp_raw]
-                press_kpa = [process_soil_plate_pressure(v17),
-                             process_agg_plate_pressure(v18),
-                             process_soil_pore_water_pressure(v19),
-                             process_agg_pore_water_pressure(v20)]
+                # Pressure formulas expect millivolts — convert from volts first
+                press_kpa = [process_soil_plate_pressure(v17 * 1000),
+                             process_agg_plate_pressure(v18 * 1000),
+                             process_soil_pore_water_pressure(v19 * 1000),
+                             process_agg_pore_water_pressure(v20 * 1000)]
 
                 # ── Phase A: collect ramp samples for baseline ────
                 if ramp_collected < RAMP_SAMPLES:
@@ -280,7 +281,7 @@ def run_acquisition():
                         print(f"\nRamp complete. Baseline set at 1 kip. Cyclic recording started.")
                         for (bt, bd, bp, bs) in proc_buffer:
                             d_tared = [bd[i] - baseline_disp_in[i]   for i in range(12)]
-                            p_tared = [(bp[i] - baseline_press_kpa[i]) * KPA_TO_KSI for i in range(4)]
+                            p_tared = [(bp[i] - baseline_press_kpa[i]) * KPA_TO_PSI for i in range(4)]
                             s_tared = [bs[i] - baseline_strain[i]    for i in range(8)]
                             proc_row = [f"{bt:.6f}"] + \
                                        [f"{v:.6f}" for v in d_tared] + \
@@ -294,7 +295,7 @@ def run_acquisition():
                 strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(8)]
                 disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
                 press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
-                press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
+                press_tared_psi = [v * KPA_TO_PSI for v in press_tared_kpa]
 
                 output_sample_count += 1
                 t = output_sample_count / SAMPLE_RATE
@@ -312,7 +313,7 @@ def run_acquisition():
 
                 proc_row = [f"{t:.6f}"] + \
                            [f"{v:.6f}" for v in disp_tared] + \
-                           [f"{v:.6f}" for v in press_tared_ksi] + \
+                           [f"{v:.6f}" for v in press_tared_psi] + \
                            [f"{v:.6f}" for v in strain_tared]
                 proc_file.write("\t".join(proc_row) + "\n")
 
@@ -325,8 +326,8 @@ def run_acquisition():
                     disp_plot[i].append(disp_tared[i])
                     disp_full[i].append(disp_tared[i])
                 for i in range(4):
-                    press_plot[i].append(press_tared_ksi[i])
-                    press_full[i].append(press_tared_ksi[i])
+                    press_plot[i].append(press_tared_psi[i])
+                    press_full[i].append(press_tared_psi[i])
                 b2bot_plot.append(disp_tared[6])
                 b2bot_full.append(disp_tared[6])
 
