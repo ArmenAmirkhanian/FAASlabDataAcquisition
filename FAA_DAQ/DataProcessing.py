@@ -18,7 +18,7 @@ STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
 HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
-WALK_COUNTDOWN   = 10         # Seconds countdown before recording — time to walk to MTS
+WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
 KPA_TO_PSI       = 0.145038      # kPa → psi conversion
