@@ -163,8 +163,8 @@ def run_acquisition():
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8))
         fig.suptitle("Live DAQ Data")
 
-        # Rolling window for live plots — last 1 hour of data
-        PLOT_WINDOW = 3600 * SAMPLE_RATE   # 57,600 points at 16 Hz
+        # Rolling window for live plots — last 1 minute of data
+        PLOT_WINDOW = 60 * SAMPLE_RATE     # 960 points at 16 Hz
         t_data      = deque(maxlen=PLOT_WINDOW)
         strain_plot = [deque(maxlen=PLOT_WINDOW) for _ in range(8)]
         disp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(12)]
