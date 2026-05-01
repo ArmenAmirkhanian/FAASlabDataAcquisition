@@ -20,24 +20,7 @@ HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 mini
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-# Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)
-# ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
-# ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
-# ai11:                       1 in stroke  (10 V = 0.9843 in)
-DISP_SCALE = [
-    3.937 / 10.0,   # ai0  DCDT_Right_Slab_A1
-    3.937 / 10.0,   # ai1  DCDT_Right_Slab_A2
-    3.937 / 10.0,   # ai2  DCDT_Right_Slab_A3
-    3.937 / 10.0,   # ai3  DCDT_Right_Slab_B1
-    1.969 / 10.0,   # ai4  DCDT_Right_Slab_B3
-    3.937 / 10.0,   # ai5  DCDT_Left_Slab_B1
-    3.937 / 10.0,   # ai6  DCDT_Left_Slab_B2_Bot
-    1.969 / 10.0,   # ai7  DCDT_Left_Slab_B3
-    3.937 / 10.0,   # ai8  DCDT_Left_Slab_C1
-    3.937 / 10.0,   # ai9  DCDT_Left_Slab_C2
-    3.937 / 10.0,   # ai10 DCDT_Left_Slab_C3
-    0.9843 / 10.0,  # ai11 DCDT_Beam_B2_Top
-]
+DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
 KPA_TO_PSI       = 0.145038      # kPa → psi conversion
 
 # ─── PRESSURE CONVERSION FORMULAS (one per channel) ──────────
@@ -206,21 +189,7 @@ def run_acquisition():
         ax2.set_title("Displacement - Processed")
         ax2.set_xlabel("Time (s)")
         ax2.set_ylabel("Displacement (in)")
-        disp_colors = [
-            '#1f77b4',  # 0  Right_Slab_A1  - blue
-            '#ff7f0e',  # 1  Right_Slab_A2  - orange
-            '#2ca02c',  # 2  Right_Slab_A3  - green
-            '#d62728',  # 3  Right_Slab_B1  - red
-            '#9467bd',  # 4  Right_Slab_B3  - purple
-            '#8c564b',  # 5  Left_Slab_B1   - brown
-            '#e377c2',  # 6  Left_Slab_B2_Bot - pink
-            '#7f7f7f',  # 7  Left_Slab_B3   - gray
-            '#bcbd22',  # 8  Left_Slab_C1   - olive
-            '#17becf',  # 9  Left_Slab_C2   - teal
-            '#f0027f',  # 10 Left_Slab_C3   - magenta
-            '#000000',  # 11 Beam_B2_Top    - black
-        ]
-        disp_lines = [ax2.plot([], [], label=disp_names[i], color=disp_colors[i])[0] for i in range(12)]
+        disp_lines = [ax2.plot([], [], label=disp_names[i])[0] for i in range(12)]
         ax2.legend(fontsize=6, loc="upper left")
 
         # Plot 3: Time vs Pressure (processed, psi)
@@ -269,7 +238,7 @@ def run_acquisition():
                 prev_disp_raw = disp_raw
 
                 # ── Step 2: Convert raw to physical units ─────────
-                disp_in   = [disp_raw[i] * DISP_SCALE[i] for i in range(12)]
+                disp_in   = [v * DISP_SCALE for v in disp_raw]
                 # Pressure formulas expect millivolts — convert from volts first
                 press_kpa = [process_soil_plate_pressure(v17 * 1000),
                              process_agg_plate_pressure(v18 * 1000),
