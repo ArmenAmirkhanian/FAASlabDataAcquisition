@@ -454,6 +454,7 @@ def run_acquisition():
             else:
                 print("Plots discarded.")
 
+            plt.close('all')
             root.destroy()
 
 # ─── RUN ──────────────────────────────────────────────────────
