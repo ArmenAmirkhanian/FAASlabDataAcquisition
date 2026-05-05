@@ -20,6 +20,7 @@ HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 mini
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
+RECORD_SAMPLES   = 160160     # Samples to record after ramp (10000 s cyclic + 10 s end ramp × 16 Hz), then auto-stop and save
 # Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)
 # ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
 # ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
@@ -125,6 +126,7 @@ def run_acquisition():
         # Buffer for processed rows during ramp (can't tare until ramp ends)
         proc_buffer = []
         plot_counter = 0
+        cyclic_sample_count = 0   # counts Phase B samples toward RECORD_SAMPLES
 
         # Auto-zero detection: skip samples where any displacement channel
         # jumps more than this threshold in one sample (NI-9235 calibration artifact)
@@ -323,6 +325,11 @@ def run_acquisition():
                     continue
 
                 # ── Phase B: cyclic recording — baseline ready ────
+                cyclic_sample_count += 1
+                if cyclic_sample_count >= RECORD_SAMPLES:
+                    print(f"\nRecording complete ({RECORD_SAMPLES} samples). Auto-stopping...")
+                    raise KeyboardInterrupt
+
                 strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(8)]
                 disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
                 press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
