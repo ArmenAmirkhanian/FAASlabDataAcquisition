@@ -101,8 +101,8 @@ def run_acquisition():
 
         # -- Set sample rates — 30s buffer reduces DAQmx circular-buffer wrap glitches --
         # NI-9235 does not expose SampleClock; both tasks run independently
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 30)
-        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 30)
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
+        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
