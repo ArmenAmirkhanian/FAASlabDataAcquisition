@@ -1,3 +1,4 @@
+import gc
 import nidaqmx
 from nidaqmx.constants import (BridgeConfiguration,
                                 ExcitationSource,
@@ -64,6 +65,7 @@ def smooth(y):
 
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
+    gc.disable()
     with nidaqmx.Task() as strain_task, \
          nidaqmx.Task() as voltage_task:
 
@@ -97,10 +99,10 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates — large buffer (10s) to absorb plotting/IO delays --
+        # -- Set sample rates — 30s buffer reduces DAQmx circular-buffer wrap glitches --
         # NI-9235 does not expose SampleClock; both tasks run independently
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
-        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 30)
+        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 30)
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
@@ -393,6 +395,7 @@ def run_acquisition():
 
 
         except KeyboardInterrupt:
+            gc.enable()
             print("\nAcquisition stopped.")
             raw_file.close()
             proc_file.close()
