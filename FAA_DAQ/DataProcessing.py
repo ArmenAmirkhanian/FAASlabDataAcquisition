@@ -99,10 +99,16 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates — 30s buffer reduces DAQmx circular-buffer wrap glitches --
-        # NI-9235 does not expose SampleClock; both tasks run independently
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
+        # -- Set sample rates (shared clock: NI-9205 as master) --
+        # Voltage task runs as master — NI-9205 has no minimum rate restriction
+        # Strain task slaves to voltage module SampleClock — hardware-level sync
+        # Both tasks tick on the exact same pulse; eliminates drift between DCDT/pressure and strain
         voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
+        strain_task.timing.cfg_samp_clk_timing(
+            HW_RATE,
+            source=f"/{VOLTAGE_MODULE}/SampleClock",
+            samps_per_chan=HW_RATE * 3600
+        )
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
