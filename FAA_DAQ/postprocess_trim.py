@@ -251,10 +251,8 @@ if not in_path:
 
 root.destroy()
 
-base     = os.path.splitext(in_path)[0]
-out_path = base + "_trimmed.txt"
+default_name = os.path.splitext(os.path.basename(in_path))[0] + "_trimmed.txt"
 print(f"Input : {in_path}")
-print(f"Output: {out_path}")
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 df   = pd.read_csv(in_path, sep="\t")
@@ -405,6 +403,24 @@ for c in all_cols:
         out_data[c] = strain_slice[:, strain_cols.index(c)]
 
 out_df = pd.DataFrame(out_data)
+
+# ── Save-as dialog ───────────────────────────────────────────────────────────
+save_root = tk.Tk()
+save_root.withdraw()
+
+out_path = filedialog.asksaveasfilename(
+    title="Save trimmed output file as...",
+    initialdir=os.path.dirname(in_path),
+    initialfile=default_name,
+    defaultextension=".txt",
+    filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+)
+
+save_root.destroy()
+
+if not out_path:
+    print("\n  Save cancelled — no file written.")
+    raise SystemExit(0)
 
 # ── Write output ──────────────────────────────────────────────────────────────
 with open(out_path, "w") as f:
