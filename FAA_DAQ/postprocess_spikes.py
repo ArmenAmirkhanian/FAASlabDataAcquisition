@@ -1,10 +1,14 @@
 """
-Spike post-processor — interactive cycle-start identification, optional trim,
-phase-aligned spike detection (cyclic) or diff-MAD (static), and cycle-phase
-interpolation correction.  Writes a clean output file.
+postprocess_spikes.py — Spike / bad-cycle correction on a trimmed file.
+
+Input : <name>_trimmed.txt  (output of postprocess_trim.py)
+Output: <name>_trimmed_clean.txt  +  <name>_trimmed_clean_report.png
+
+The first RAMP_SECONDS of the trimmed file are ramp data and are preserved
+unchanged; bad-cycle detection starts from the cycle anchor row onward.
 
 Usage:
-    python postprocess_spikes.py    # opens a file browser to select input file
+    python postprocess_spikes.py
 """
 
 import os
@@ -12,28 +16,32 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-SPIKE_ZSCORE         = 5.0
-PHASE_WINDOW_CYCLES  = 30
-MIN_MAD              = 1e-9
-MAX_CYCLE_SEARCH     = 10
-MAD_WINDOW_S         = 30
-SAMPLE_RATE          = 16
-MAD_WINDOW           = MAD_WINDOW_S * SAMPLE_RATE
-STATIC_ZSCORE        = 8.0
-RAMP_SECONDS         = 10.0   # seconds of ramp data to keep before cycle start
+MIN_MAD       = 1e-9
+MAD_WINDOW_S  = 32
+SAMPLE_RATE   = 16
+MAD_WINDOW    = MAD_WINDOW_S * SAMPLE_RATE
+STATIC_ZSCORE = 8.0
+RAMP_SECONDS  = 5.0   # must match postprocess_trim.py
 
-# ── Interactive cycle-start selector ─────────────────────────────────────────
-def select_time_markers(time_arr, data_arr, cols_list):
+# ── Interactive bad-cycle selector ────────────────────────────────────────────
+def select_bad_cycle_markers(time_arr, data_arr, cols_list):
     """
-    Scrollable interactive plot.  Two markers are placed by clicking:
-      • File start  (blue  |  )  — where the output file begins; ramp data is kept
-      • Cycle start (orange - -)  — first data point of the first load cycle;
-                                    used as the phase anchor for spike detection
-    Returns (t_file_start, t_cycle_start).  Either can be None if not clicked.
+    Shows the trimmed aligned data. User marks the start of the 1st, 2nd, 3rd,
+    and 4th bad cycle. Returns (t1, t2, t3, t4) — any can be None if not placed.
     """
-    WINDOW_S = 20.0
+    WINDOW_S = 35.0
+
+    MARKERS = [
+        ("1st", "#cc6600", "#ffd090", "#ffba60"),
+        ("2nd", "#cc0000", "#ff9090", "#ff6060"),
+        ("3rd", "#8800cc", "#ddb0ff", "#bb80ff"),
+        ("4th", "#0066cc", "#a0c8ff", "#70a8ff"),
+    ]
+    KEYS = ["1st", "2nd", "3rd", "4th"]
 
     def ch_color(c):
         if c.startswith("DCDT_"):                               return "steelblue"
@@ -42,22 +50,19 @@ def select_time_markers(time_arr, data_arr, cols_list):
         return "gray"
 
     colors = [ch_color(c) for c in cols_list]
+    vis    = [c.startswith("DCDT_") for c in cols_list]
+    if not any(vis): vis[0] = True
 
-    vis = [c.startswith("DCDT_") for c in cols_list]
-    if not any(vis):
-        vis[0] = True
+    t_marks      = {k: [None] for k in KEYS}
+    mode         = [None]
+    leg_line_map = {}
 
-    t_cycle_start = [None]          # orange dashed line
-    t_file_end    = [None]          # green solid line
-    mode          = ["cycle_start"] # which marker the next click places
-    leg_line_map  = {}
-
-    # ── Figure ──────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(17, 9))
     fig.suptitle(
-        "Click 1 = Cycle start (orange --)  •  Click 2 = File end (green |)  |  "
-        "Scroll to navigate  •  Click legend to toggle channel  •  Close when done",
-        fontsize=9, fontweight="bold"
+        "Arm a marker button → click the start of that bad cycle  |  "
+        "Gaps between markers are shown live\n"
+        "Place all 4 to see all 3 gaps  •  Close when done",
+        fontsize=8.5, fontweight="bold"
     )
 
     plot_ax  = fig.add_axes([0.08, 0.13, 0.90, 0.79])
@@ -65,42 +70,40 @@ def select_time_markers(time_arr, data_arr, cols_list):
 
     bw, bh, bx = 0.065, 0.048, 0.005
 
-    # Channel group buttons
     btn_dcdt  = Button(fig.add_axes([bx, 0.80, bw, bh]), "DCDT",     color="#d0e8ff", hovercolor="#b0cfff")
     btn_sg    = Button(fig.add_axes([bx, 0.75, bw, bh]), "Strain",   color="#ffd0d0", hovercolor="#ffb0b0")
     btn_press = Button(fig.add_axes([bx, 0.70, bw, bh]), "Pressure", color="#ffe0b0", hovercolor="#ffc870")
     btn_all   = Button(fig.add_axes([bx, 0.65, bw, bh]), "All on",   color="#d0ffd0", hovercolor="#b0ffb0")
     btn_none  = Button(fig.add_axes([bx, 0.60, bw, bh]), "All off",  color="#e8e8e8", hovercolor="#d0d0d0")
 
-    # Marker mode buttons
-    ax_mcs = fig.add_axes([bx, 0.51, bw, bh])
-    ax_mfe = fig.add_axes([bx, 0.46, bw, bh])
-    btn_mode_cs = Button(ax_mcs, "Set\nCycle start", color="#ffd090", hovercolor="#ffba60")
-    btn_mode_fe = Button(ax_mfe, "Set\nFile end",    color="#b0ffb0", hovercolor="#80ee80")
+    marker_btn_info = []
+    for i, (label, armed_col, idle_col, hover_col) in enumerate(MARKERS):
+        y    = 0.51 - i * 0.05
+        ax_  = fig.add_axes([bx, y, bw, bh])
+        btn_ = Button(ax_, f"{label} bad\ncycle", color=idle_col, hovercolor=hover_col)
+        btn_.label.set_fontsize(7)
+        marker_btn_info.append((KEYS[i], armed_col, idle_col, btn_, ax_))
 
-    for btn in (btn_dcdt, btn_sg, btn_press, btn_all, btn_none,
-                btn_mode_cs, btn_mode_fe):
+    for btn in (btn_dcdt, btn_sg, btn_press, btn_all, btn_none):
         btn.label.set_fontsize(7)
 
-    # Slider
     t_max_sl = max(float(time_arr[-1]) - WINDOW_S, float(time_arr[0]) + 0.01)
     slider   = Slider(slide_ax, "Time (s)", float(time_arr[0]), t_max_sl,
                       valinit=float(time_arr[0]), color="steelblue")
 
     def update_mode_buttons():
-        btn_mode_cs.color      = "#cc8010" if mode[0] == "cycle_start" else "#ffd090"
-        btn_mode_cs.hovercolor = "#bb6f00" if mode[0] == "cycle_start" else "#ffba60"
-        btn_mode_fe.color      = "#009900" if mode[0] == "file_end"    else "#b0ffb0"
-        btn_mode_fe.hovercolor = "#007700" if mode[0] == "file_end"    else "#80ee80"
-        btn_mode_cs.label.set_color("white" if mode[0] == "cycle_start" else "black")
-        btn_mode_fe.label.set_color("white" if mode[0] == "file_end"    else "black")
-        ax_mcs.set_facecolor(btn_mode_cs.color)
-        ax_mfe.set_facecolor(btn_mode_fe.color)
+        for key, armed_col, idle_col, btn, ax in marker_btn_info:
+            armed = (mode[0] == key)
+            c = armed_col if armed else idle_col
+            btn.color = c; btn.hovercolor = c
+            btn.label.set_color("white" if armed else "black")
+            ax.set_facecolor(c)
+        fig.canvas.draw_idle()
 
     update_mode_buttons()
 
-    # ── Draw ────────────────────────────────────────────────────────────────
-    def redraw(_=None):
+    def redraw(_=None, keep_xlim=False):
+        saved_xlim = plot_ax.get_xlim() if keep_xlim else None
         t_left  = slider.val
         t_right = t_left + WINDOW_S
         mask    = (time_arr >= t_left) & (time_arr <= t_right)
@@ -109,51 +112,50 @@ def select_time_markers(time_arr, data_arr, cols_list):
         plot_ax.cla()
         leg_line_map.clear()
 
-        plotted_channels = []
+        plotted = []
         for i, c in enumerate(cols_list):
             if vis[i]:
-                plot_ax.plot(win_t, data_arr[mask, i],
-                             lw=0.9, color=colors[i], label=c, alpha=0.85)
-                plotted_channels.append(c)
+                plot_ax.plot(win_t, data_arr[mask, i], lw=0.9, color=colors[i],
+                             label=c, alpha=0.85)
+                plotted.append(c)
 
-        # Cycle-start marker — dashed orange vertical line
-        if t_cycle_start[0] is not None:
-            plot_ax.axvline(t_cycle_start[0], color="#cc6600", lw=2.0, ls="--",
-                            zorder=10, label=f"Cycle start: {t_cycle_start[0]:.4f} s")
+        for key, armed_col, idle_col, btn, ax in marker_btn_info:
+            t = t_marks[key][0]
+            if t is not None:
+                plot_ax.axvline(t, color=armed_col, lw=2, ls="--", zorder=10,
+                                label=f"{key}: {t:.3f} s")
 
-        # File-end marker — solid green vertical line
-        if t_file_end[0] is not None:
-            plot_ax.axvline(t_file_end[0], color="#007700", lw=2.0, ls="-",
-                            zorder=10, label=f"File end: {t_file_end[0]:.4f} s")
+        gap_parts  = []
+        placed_vals = [t_marks[k][0] for k in KEYS if t_marks[k][0] is not None]
+        placed_vals.sort()
+        for i in range(len(placed_vals) - 1):
+            gap_parts.append(f"gap{i+1}={placed_vals[i+1]-placed_vals[i]:.3f}s")
 
-        # Status line
-        parts = []
-        if t_cycle_start[0] is not None: parts.append(f"Cycle start = {t_cycle_start[0]:.4f} s  (orange --)")
-        if t_file_end[0]    is not None: parts.append(f"File end = {t_file_end[0]:.4f} s  (green |)")
-        active_name = {"cycle_start": "CYCLE START", "file_end": "FILE END"}[mode[0]]
-        active_col  = {"cycle_start": "#cc6600",     "file_end": "#007700"}[mode[0]]
-        status = "  •  ".join(parts) if parts else ""
-        plot_ax.set_title(
-            f"Next click places:  {active_name}  —  {status}\n"
-            "Click a legend entry to toggle that channel",
-            fontsize=8.5, color=active_col
-        )
+        if mode[0] is not None:
+            col   = next(armed for key, armed, _, _, _ in marker_btn_info if key == mode[0])
+            title = f"ARMED: {mode[0].upper()} BAD CYCLE  —  click on plot  |  {'  •  '.join(gap_parts)}"
+        else:
+            col   = "gray"
+            title = f"No marker armed — zoom/pan freely  |  {'  •  '.join(gap_parts)}"
 
-        plot_ax.set_xlim(t_left, t_right)
+        plot_ax.set_title(f"{title}\nClick legend to toggle channel",
+                          fontsize=8.5, color=col)
+        if keep_xlim and saved_xlim is not None:
+            plot_ax.set_xlim(saved_xlim)
+        else:
+            plot_ax.set_xlim(t_left, t_right)
         plot_ax.set_xlabel("Time (s)", fontsize=9)
         plot_ax.set_ylabel("Value", fontsize=9)
         plot_ax.grid(True, alpha=0.3)
 
-        if plotted_channels or t_cycle_start[0] is not None or t_file_end[0] is not None:
+        if plotted or any(t_marks[k][0] is not None for k in KEYS):
             leg = plot_ax.legend(fontsize=7, ncol=2, loc="upper right")
-            for leg_line, ch_name in zip(leg.get_lines(), plotted_channels):
-                leg_line.set_picker(8)
-                leg_line.set_linewidth(2.5)
-                leg_line_map[leg_line] = ch_name
+            for ll, ch_name in zip(leg.get_lines(), plotted):
+                ll.set_picker(8); ll.set_linewidth(2.5)
+                leg_line_map[ll] = ch_name
 
         fig.canvas.draw_idle()
 
-    # ── Callbacks ───────────────────────────────────────────────────────────
     def set_group(group):
         for i, c in enumerate(cols_list):
             if   group == "dcdt":  vis[i] = c.startswith("DCDT_")
@@ -161,35 +163,28 @@ def select_time_markers(time_arr, data_arr, cols_list):
             elif group == "press": vis[i] = "pressure" in c.lower() or c.startswith("volt_ch")
             elif group == "all":   vis[i] = True
             elif group == "none":  vis[i] = False
-        redraw()
+        redraw(keep_xlim=True)
 
-    def set_mode(m):
-        mode[0] = m
+    def toggle_mode(m):
+        mode[0] = None if mode[0] == m else m
         update_mode_buttons()
-        fig.canvas.draw_idle()
+        redraw(keep_xlim=True)
 
     def on_legend_pick(event):
-        leg_line = event.artist
-        if leg_line not in leg_line_map:
-            return
-        idx = cols_list.index(leg_line_map[leg_line])
+        ll = event.artist
+        if ll not in leg_line_map: return
+        idx = cols_list.index(leg_line_map[ll])
         vis[idx] = not vis[idx]
-        redraw()
+        redraw(keep_xlim=True)
 
     def on_plot_click(event):
-        if event.inaxes is not plot_ax or event.button != 1 or event.xdata is None:
-            return
+        if mode[0] is None: return
+        if event.inaxes is not plot_ax or event.button != 1 or event.xdata is None: return
         leg = plot_ax.get_legend()
-        if leg is not None and leg.get_window_extent().contains(event.x, event.y):
-            return
+        if leg is not None and leg.get_window_extent().contains(event.x, event.y): return
         snapped = float(time_arr[int(np.argmin(np.abs(time_arr - event.xdata)))])
-        if mode[0] == "cycle_start":
-            t_cycle_start[0] = snapped
-            mode[0] = "file_end"      # auto-advance after 1st click
-        else:
-            t_file_end[0] = snapped
-        update_mode_buttons()
-        redraw()
+        t_marks[mode[0]][0] = snapped
+        redraw(keep_xlim=True)
 
     slider.on_changed(redraw)
     btn_dcdt.on_clicked(lambda _: set_group("dcdt"))
@@ -197,30 +192,28 @@ def select_time_markers(time_arr, data_arr, cols_list):
     btn_press.on_clicked(lambda _: set_group("press"))
     btn_all.on_clicked(lambda _: set_group("all"))
     btn_none.on_clicked(lambda _: set_group("none"))
-    btn_mode_cs.on_clicked(lambda _: set_mode("cycle_start"))
-    btn_mode_fe.on_clicked(lambda _: set_mode("file_end"))
+    for key, _, _, btn, _ in marker_btn_info:
+        btn.on_clicked(lambda _, k=key: toggle_mode(k))
     fig.canvas.mpl_connect("pick_event",         on_legend_pick)
     fig.canvas.mpl_connect("button_press_event", on_plot_click)
 
     redraw()
     plt.show()
 
-    return t_cycle_start[0], t_file_end[0]
+    return (t_marks["1st"][0], t_marks["2nd"][0],
+            t_marks["3rd"][0], t_marks["4th"][0])
 
 
 # ── File browser ──────────────────────────────────────────────────────────────
-import tkinter as tk
-from tkinter import filedialog, messagebox
-
 root = tk.Tk()
 root.withdraw()
 
 in_path = filedialog.askopenfilename(
-    title="Select raw data file to process",
+    title="Select trimmed file to correct (*_trimmed.txt)",
     initialdir=os.path.dirname(os.path.abspath(__file__)),
-    filetypes=[("Raw data files", "data_raw_*.txt"),
-               ("Text files",     "*.txt"),
-               ("All files",      "*.*")]
+    filetypes=[("Trimmed files", "*_trimmed.txt"),
+               ("Text files",    "*.txt"),
+               ("All files",     "*.*")]
 )
 
 if not in_path:
@@ -236,93 +229,27 @@ print(f"Input : {in_path}")
 print(f"Output: {out_path}")
 
 # ── Load ──────────────────────────────────────────────────────────────────────
-df   = pd.read_csv(in_path, sep="\t")
-time = df["time_s"].values
+df           = pd.read_csv(in_path, sep="\t")
+time_aligned = df["time_s"].values
+cols         = [c for c in df.columns if c != "time_s"]
+data         = df[cols].values.astype(float)
+N, n_ch      = data.shape
+dt           = 1.0 / SAMPLE_RATE
 
-t_start  = time[0]
-t_end    = time[-1]
-duration = t_end - t_start
-n_rows   = len(df)
-dt       = np.median(np.diff(time))
+cycle_start_idx = int(round(RAMP_SECONDS * SAMPLE_RATE))
 
 print(f"\n{'─'*50}")
-print(f"  File         : {os.path.basename(in_path)}")
-print(f"  Total rows   : {n_rows:,}")
-print(f"  Time range   : {t_start:.2f} s  →  {t_end:.2f} s")
-print(f"  Duration     : {duration:.2f} s  ({duration/60:.1f} min)")
-print(f"  Sample rate  : {1/dt:.2f} Hz")
+print(f"  File            : {os.path.basename(in_path)}")
+print(f"  Total rows      : {N:,}")
+print(f"  Time range      : {time_aligned[0]:.2f} s → {time_aligned[-1]:.2f} s")
+print(f"  Duration        : {time_aligned[-1]:.2f} s  ({time_aligned[-1]/60:.1f} min)")
+print(f"  Channels        : {n_ch}")
+print(f"  Cycle anchor    : row {cycle_start_idx}  (t = {time_aligned[cycle_start_idx]:.4f} s)")
 print(f"{'─'*50}")
-
-all_cols  = [c for c in df.columns if c != "time_s"]
-
-# ── Interactive marker selection (full un-trimmed data) ───────────────────────
-print("\n  Opening interactive plot.")
-print("  First click  → CYCLE START (orange --) — first data point of first load cycle")
-print("  Second click → FILE END    (green |)   — where output file ends")
-print("  Use left-side buttons to switch marker or re-click to move either line.")
-print("  Close the window when done.")
-
-full_data                    = df[all_cols].values.astype(float)
-t_cycle_start, t_file_end   = select_time_markers(time, full_data, all_cols)
-del full_data
-
-print(f"\n  Plot closed.")
-if t_cycle_start is not None: print(f"    Cycle start : {t_cycle_start:.4f} s")
-if t_file_end    is not None: print(f"    File end    : {t_file_end:.4f} s")
-
-# ── Confirm / trim ────────────────────────────────────────────────────────────
-print("\n  Confirm values  (press Enter to accept the value in brackets)\n")
-
-while True:
-    try:
-        default = t_cycle_start if t_cycle_start is not None else t_start
-        raw = input(f"  Cycle start (s) [{default:.4f}]: ").strip()
-        t_cycle_start = float(raw) if raw else default
-        if t_cycle_start < t_start or t_cycle_start > t_end:
-            print(f"  Must be between {t_start:.2f} and {t_end:.2f}.")
-            continue
-        break
-    except ValueError:
-        print("  Enter a number.")
-
-while True:
-    try:
-        default_end = t_file_end if t_file_end is not None else t_end
-        raw = input(f"  File end    (s) [{default_end:.4f}]: ").strip()
-        t_file_end = float(raw) if raw else default_end
-        if t_file_end <= t_cycle_start or t_file_end > t_end:
-            print(f"  Must be greater than cycle start ({t_cycle_start:.2f}) and ≤ {t_end:.2f}.")
-            continue
-        break
-    except ValueError:
-        print("  Enter a number.")
-
-t_file_start = max(t_start, t_cycle_start - RAMP_SECONDS)
-actual_ramp  = t_cycle_start - t_file_start
-
-print(f"\n  File start  : {t_file_start:.4f} s  "
-      f"({actual_ramp:.2f} s of ramp before cycle start,  "
-      f"RAMP_SECONDS={RAMP_SECONDS})")
-print(f"  Cycle start : {t_cycle_start:.4f} s")
-print(f"  File end    : {t_file_end:.4f} s")
-
-mask = (time >= t_file_start) & (time <= t_file_end)
-df   = df[mask].reset_index(drop=True)
-time = df["time_s"].values
-print(f"\n  Kept {len(df):,} rows  "
-      f"({time[0]:.4f} s → {time[-1]:.4f} s,  "
-      f"{time[-1]-time[0]:.2f} s total duration)")
-
-cols    = [c for c in df.columns if c != "time_s"]
-data    = df[cols].values.astype(float)
-N, n_ch = data.shape
-dt      = np.median(np.diff(time))
-
-print(f"\nProcessing {N:,} samples, {n_ch} channels")
 
 # ── Load type ─────────────────────────────────────────────────────────────────
 print("\n  Load type:")
-print("  [C] Cyclic  — phase-to-phase comparison across 30 cycles")
+print("  [C] Cyclic  — bad-cycle replacement")
 print("  [S] Static  — rolling MAD on consecutive differences")
 
 while True:
@@ -331,23 +258,21 @@ while True:
         break
     print("  Enter C or S.")
 
-use_cycle       = (load_type == "C")
-spc             = None
-cycle_start_idx = 0
+use_cycle = (load_type == "C")
+spc       = None
 
 if use_cycle:
-    # ── Frequency ─────────────────────────────────────────────────────────────
     print("\n  Cyclic loading frequency:")
     print("  [A] Auto-detect via FFT  or  enter Hz (e.g. 0.5, 1.0, 2.0)")
 
     while True:
         freq_input = input("\n  Frequency (Hz) or A: ").strip().lower()
         if freq_input in ("a", "auto"):
-            dcdt_idx = next((k for k, c in enumerate(cols) if c.startswith("DCDT_")), 0)
-            sig      = data[:, dcdt_idx] - data[:, dcdt_idx].mean()
-            freqs    = np.fft.rfftfreq(len(sig), d=dt)
-            power    = np.abs(np.fft.rfft(sig))
-            power[0] = 0
+            dcdt_idx  = next((k for k, c in enumerate(cols) if c.startswith("DCDT_")), 0)
+            sig       = data[:, dcdt_idx] - data[:, dcdt_idx].mean()
+            freqs     = np.fft.rfftfreq(len(sig), d=dt)
+            power     = np.abs(np.fft.rfft(sig))
+            power[0]  = 0
             peak_freq = freqs[np.argmax(power)]
             print(f"  Auto-detected: {peak_freq:.4f} Hz")
             test_freq = peak_freq
@@ -363,56 +288,87 @@ if use_cycle:
                 print("  Enter a number or A.")
 
     spc           = int(round(1.0 / test_freq / dt))
-    n_full_cycles = N // spc
+    n_full_cycles = (N - cycle_start_idx) // spc
     print(f"  Samples per cycle : {spc}  (f = {test_freq:.4f} Hz,  dt = {dt:.4f} s)")
-    print(f"  Total full cycles : {n_full_cycles}")
-
-    # Resolve cycle start index relative to the (possibly trimmed) time array
-    if t_cycle_start is not None:
-        cycle_start_idx = int(np.searchsorted(time, t_cycle_start))
-        # Clamp to valid range
-        cycle_start_idx = max(0, min(cycle_start_idx, N - 1))
-        print(f"  Cycle anchor      : t = {time[cycle_start_idx]:.4f} s  "
-              f"(sample {cycle_start_idx})")
-        print(f"  Full cycles from anchor : {(N - cycle_start_idx) // spc}")
-    else:
-        cycle_start_idx = 0
-        print(f"  Cycle anchor      : t = {time[0]:.4f} s  (no anchor selected — using start)")
-
-    if n_full_cycles < PHASE_WINDOW_CYCLES:
-        print(f"  WARNING: fewer than {PHASE_WINDOW_CYCLES} full cycles — "
-              f"reference window reduced automatically.")
+    print(f"  Full cycles from anchor : {n_full_cycles}")
 
 # ── Spike detection ───────────────────────────────────────────────────────────
 spike_flags = np.zeros((N, n_ch), dtype=bool)
+bad_starts  = []
 
 if use_cycle:
-    print(f"\nPhase-aligned spike detection  "
-          f"(SPIKE_ZSCORE={SPIKE_ZSCORE}, window={PHASE_WINDOW_CYCLES} cycles)...")
-    min_per = max(3, PHASE_WINDOW_CYCLES // 6)
+    print("\n  Opening bad-cycle selector.")
+    print("  Place up to 4 markers on consecutive bad cycles.")
+    print("  The gaps between them are shown live — place all 4 for best accuracy.\n")
 
-    for ch in range(n_ch):
-        for p in range(spc):
-            first = cycle_start_idx + p
-            if first >= N:
-                continue
-            indices = np.arange(first, N, spc)
-            vals    = pd.Series(data[indices, ch])
+    t1, t2, t3, t4 = select_bad_cycle_markers(time_aligned, data, cols)
 
-            ref_med   = vals.rolling(PHASE_WINDOW_CYCLES, center=True,
-                                     min_periods=min_per).median()
-            deviation = (vals - ref_med).abs()
-            roll_mad  = deviation.rolling(PHASE_WINDOW_CYCLES, center=True,
-                                          min_periods=min_per).median()
-            roll_mad  = roll_mad.clip(lower=MIN_MAD)
+    placed = [(t, int(np.argmin(np.abs(time_aligned - t))))
+              for t in [t1, t2, t3, t4] if t is not None]
+    placed.sort(key=lambda x: x[0])
 
-            spike_flags[indices, ch] = (deviation > SPIKE_ZSCORE * roll_mad).values
+    if len(placed) < 2:
+        print("  ERROR: need at least 2 markers placed. Exiting.")
+        raise SystemExit(1)
 
-    print("Phase-aligned detection complete.")
+    gaps    = [placed[i+1][1] - placed[i][1] for i in range(len(placed) - 1)]
+    avg_gap = int(round(sum(gaps) / len(gaps)))
+
+    print(f"\n  Markers placed: {len(placed)}")
+    print(f"  {'Marker':<8} {'Time (s)':>10}   {'Row':>6}")
+    for idx, (t, row) in enumerate(placed):
+        print(f"  #{idx+1:<7} {t:>10.4f}   {row:>6}")
+
+    print(f"\n  Gaps between consecutive markers:")
+    for i, g in enumerate(gaps):
+        print(f"    gap {i+1}→{i+2} : {g} rows  ({g / SAMPLE_RATE:.4f} s)")
+    print(f"  Average gap   : {avg_gap} rows  ({avg_gap / SAMPLE_RATE:.4f} s)")
+
+    print(f"\n  Period to use for all bad cycles:")
+    print(f"  [A] Average gap  ({avg_gap} rows = {avg_gap / SAMPLE_RATE:.4f} s)")
+    print(f"  [N] Enter a custom number of rows")
+    while True:
+        choice = input("\n  Select (A / N): ").strip().upper()
+        if choice == "A":
+            period_rows = avg_gap
+            print(f"  Using average period: {period_rows} rows  ({period_rows / SAMPLE_RATE:.4f} s)")
+            break
+        elif choice == "N":
+            while True:
+                try:
+                    raw = input(f"  Enter period in rows: ").strip()
+                    period_rows = int(raw)
+                    if period_rows < 1:
+                        print("  Must be >= 1.")
+                        continue
+                    print(f"  Using custom period: {period_rows} rows  ({period_rows / SAMPLE_RATE:.4f} s)")
+                    break
+                except ValueError:
+                    print("  Enter an integer.")
+            break
+        else:
+            print("  Enter A or N.")
+
+    row_first_bad = placed[0][1]
+    r = row_first_bad
+    while r + spc <= N:
+        bad_starts.append(r)
+        r += period_rows
+
+    print(f"\n  Bad cycles identified: {len(bad_starts)}")
+    print(f"  {'#':>4}   {'Row':>6}   {'Time (s)':>10}")
+    for k, r in enumerate(bad_starts):
+        print(f"  {k+1:>4}   {r:>6}   {time_aligned[r]:>10.4f}")
+
+    bad_start_set = set(bad_starts)
+    for r in bad_starts:
+        spike_flags[r : r + spc, :] = True
+
+    print(f"\n  Flagged {len(bad_starts)} bad cycles for correction.")
 
 else:
     print(f"\nDiff-based spike detection  "
-          f"(SPIKE_ZSCORE={STATIC_ZSCORE}, MAD window={MAD_WINDOW} samples)...")
+          f"(STATIC_ZSCORE={STATIC_ZSCORE}, MAD window={MAD_WINDOW} samples)...")
     diffs = np.abs(np.diff(data, axis=0))
     rolling_mad = (pd.DataFrame(diffs, columns=cols)
                    .rolling(window=MAD_WINDOW, min_periods=1)
@@ -424,49 +380,48 @@ else:
 # ── Spike summary ─────────────────────────────────────────────────────────────
 total_spiked   = int(spike_flags.sum())
 ch_with_spikes = int((spike_flags.sum(axis=0) > 0).sum())
-print(f"Detected {total_spiked} spiked channel-samples across {ch_with_spikes}/{n_ch} channels")
-for k, c in enumerate(cols):
-    n = int(spike_flags[:, k].sum())
-    if n > 0:
-        print(f"  {c:<30}: {n} spike samples  ({n/N*100:.2f}%)")
+if use_cycle:
+    n_bad_cycles = total_spiked // (spc * n_ch) if (spc * n_ch) > 0 else 0
+    print(f"Flagged {n_bad_cycles} bad cycles  "
+          f"({n_bad_cycles} × {spc} samples × {n_ch} channels = {total_spiked} channel-samples)")
+else:
+    print(f"Detected {total_spiked} spiked channel-samples across {ch_with_spikes}/{n_ch} channels")
+    for k, c in enumerate(cols):
+        n = int(spike_flags[:, k].sum())
+        if n > 0:
+            print(f"  {c:<30}: {n} spike samples  ({n/N*100:.2f}%)")
 
 if total_spiked == 0:
-    print("No spikes found — output file will be identical to input.")
+    print("No spikes found — output will be identical to input.")
 
 # ── Spike correction ──────────────────────────────────────────────────────────
 data_clean         = data.copy()
 channels_corrected = 0
 
 if use_cycle:
-    print(f"\nCorrecting via cycle-phase interpolation  (spc={spc})...")
+    print(f"\nCorrecting bad cycles: replacing with average of previous + next clean cycle...")
+    channels_corrected = n_ch
+    bad_start_set      = set(bad_starts)
     for ch in range(n_ch):
-        ch_spike_idx = np.where(spike_flags[:, ch])[0]
-        if len(ch_spike_idx) == 0:
-            continue
-        channels_corrected += 1
-        for i in ch_spike_idx:
-            prev_val = None
-            for k in range(1, MAX_CYCLE_SEARCH + 1):
-                pi = i - k * spc
-                if pi < 0:
-                    break
-                if not spike_flags[pi, ch]:
-                    prev_val = data_clean[pi, ch]
-                    break
-            next_val = None
-            for k in range(1, MAX_CYCLE_SEARCH + 1):
-                ni = i + k * spc
-                if ni >= N:
-                    break
-                if not spike_flags[ni, ch]:
-                    next_val = data_clean[ni, ch]
-                    break
-            if prev_val is not None and next_val is not None:
-                data_clean[i, ch] = (prev_val + next_val) / 2.0
-            elif prev_val is not None:
-                data_clean[i, ch] = prev_val
-            elif next_val is not None:
-                data_clean[i, ch] = next_val
+        for r in bad_starts:
+            if r + spc > N:
+                continue
+            prev_r = r - period_rows
+            while prev_r >= 0 and prev_r in bad_start_set:
+                prev_r -= period_rows
+            next_r = r + period_rows
+            while next_r + spc <= N and next_r in bad_start_set:
+                next_r += period_rows
+            prev_ok = prev_r >= 0 and prev_r + spc <= N
+            next_ok = next_r + spc <= N
+            if prev_ok and next_ok:
+                data_clean[r:r+spc, ch] = (
+                    data[prev_r:prev_r+spc, ch] + data[next_r:next_r+spc, ch]
+                ) / 2.0
+            elif prev_ok:
+                data_clean[r:r+spc, ch] = data[prev_r:prev_r+spc, ch].copy()
+            elif next_ok:
+                data_clean[r:r+spc, ch] = data[next_r:next_r+spc, ch].copy()
 
 else:
     print("\nCorrecting via linear interpolation  (static load)...")
@@ -481,8 +436,9 @@ else:
                 run_start = i
                 while i < N and ch_flags[i]:
                     i += 1
-                run_end = i
-                prev_idx, next_idx = run_start - 1, run_end
+                run_end  = i
+                prev_idx = run_start - 1
+                next_idx = run_end
                 if prev_idx < 0 and next_idx >= N:
                     pass
                 elif prev_idx < 0:
@@ -500,18 +456,150 @@ else:
 
 print(f"Corrected spikes in {channels_corrected}/{n_ch} channels")
 
+# ── Interactive comparison viewer (original vs corrected) ─────────────────────
+print("\nOpening comparison plot — review original vs corrected before saving.")
+print("Close the window when done reviewing.\n")
+
+COMP_WINDOW_S = 35.0
+
+def _comp_color(c):
+    if c.startswith("DCDT_") or c.startswith("volt_ch"): return "steelblue"
+    if c.startswith("SG_"):                               return "tomato"
+    if "pressure" in c.lower():                           return "darkorange"
+    return "gray"
+
+comp_colors = [_comp_color(c) for c in cols]
+comp_vis    = [c.startswith("DCDT_") or c.startswith("volt_ch") for c in cols]
+if not any(comp_vis):
+    comp_vis[0] = True
+
+comp_leg_map = {}
+
+fig_comp = plt.figure(figsize=(17, 9))
+fig_comp.suptitle(
+    f"Review: Original (dashed) vs Corrected (solid)  —  {os.path.basename(in_path)}\n"
+    "Close when done  •  Scroll to navigate  •  Group buttons to switch view  "
+    "•  Click legend to toggle  •  Red shading = corrected cycles",
+    fontsize=8.5, fontweight="bold"
+)
+
+cax    = fig_comp.add_axes([0.08, 0.13, 0.90, 0.79])
+csax   = fig_comp.add_axes([0.08, 0.04, 0.90, 0.04])
+
+cbw, cbh, cbx = 0.065, 0.048, 0.005
+cbtn_dcdt  = Button(fig_comp.add_axes([cbx, 0.80, cbw, cbh]), "DCDT",     color="#d0e8ff", hovercolor="#b0cfff")
+cbtn_sg    = Button(fig_comp.add_axes([cbx, 0.75, cbw, cbh]), "Strain",   color="#ffd0d0", hovercolor="#ffb0b0")
+cbtn_press = Button(fig_comp.add_axes([cbx, 0.70, cbw, cbh]), "Pressure", color="#ffe0b0", hovercolor="#ffc870")
+cbtn_all   = Button(fig_comp.add_axes([cbx, 0.65, cbw, cbh]), "All on",   color="#d0ffd0", hovercolor="#b0ffb0")
+cbtn_none  = Button(fig_comp.add_axes([cbx, 0.60, cbw, cbh]), "All off",  color="#e8e8e8", hovercolor="#d0d0d0")
+for btn in (cbtn_dcdt, cbtn_sg, cbtn_press, cbtn_all, cbtn_none):
+    btn.label.set_fontsize(7)
+
+ct_max  = max(float(time_aligned[-1]) - COMP_WINDOW_S, 0.01)
+cslider = Slider(csax, "Time (s)", 0.0, ct_max, valinit=0.0, color="steelblue")
+
+def comp_redraw(_=None, keep_xlim=False):
+    saved_xlim = cax.get_xlim() if keep_xlim else None
+    t_left  = cslider.val
+    t_right = t_left + COMP_WINDOW_S
+    mask    = (time_aligned >= t_left) & (time_aligned <= t_right)
+    win_t   = time_aligned[mask]
+
+    cax.cla()
+    comp_leg_map.clear()
+
+    for i, c in enumerate(cols):
+        if not comp_vis[i]:
+            continue
+        col = comp_colors[i]
+        cax.plot(win_t, data[mask, i],       color=col, lw=0.7, ls="--", alpha=0.45)
+        cax.plot(win_t, data_clean[mask, i], color=col, lw=1.0, ls="-",  alpha=0.9,
+                 label=c, picker=8)
+
+    for r in bad_starts:
+        t_bs = time_aligned[r]
+        t_be = time_aligned[min(r + spc - 1, N - 1)]
+        if t_bs <= t_right and t_be >= t_left:
+            cax.axvspan(max(t_bs, t_left), min(t_be, t_right),
+                        color="red", alpha=0.10, zorder=0)
+
+    cax.set_xlabel("Time (s)", fontsize=9)
+    cax.set_ylabel("Value", fontsize=8)
+    cax.set_title("Dashed = original  |  Solid = corrected  |  Red shading = corrected cycles",
+                  fontsize=9)
+    if keep_xlim and saved_xlim is not None:
+        cax.set_xlim(saved_xlim)
+    else:
+        cax.set_xlim(t_left, t_right)
+    cax.grid(True, alpha=0.3)
+
+    plotted = [cols[i] for i in range(len(cols)) if comp_vis[i]]
+    if plotted:
+        leg = cax.legend(fontsize=7, ncol=2, loc="upper right")
+        for ll, ch_name in zip(leg.get_lines(), plotted):
+            ll.set_picker(8)
+            ll.set_linewidth(2.5)
+            comp_leg_map[ll] = ch_name
+
+    fig_comp.canvas.draw_idle()
+
+def comp_set_group(group):
+    for i, c in enumerate(cols):
+        if   group == "dcdt":  comp_vis[i] = c.startswith("DCDT_") or c.startswith("volt_ch")
+        elif group == "sg":    comp_vis[i] = c.startswith("SG_")
+        elif group == "press": comp_vis[i] = "pressure" in c.lower()
+        elif group == "all":   comp_vis[i] = True
+        elif group == "none":  comp_vis[i] = False
+    comp_redraw(keep_xlim=True)
+
+def comp_on_legend_pick(event):
+    ll = event.artist
+    if ll not in comp_leg_map:
+        return
+    idx = cols.index(comp_leg_map[ll])
+    comp_vis[idx] = not comp_vis[idx]
+    comp_redraw(keep_xlim=True)
+
+cslider.on_changed(comp_redraw)
+cbtn_dcdt.on_clicked(lambda _:  comp_set_group("dcdt"))
+cbtn_sg.on_clicked(lambda _:    comp_set_group("sg"))
+cbtn_press.on_clicked(lambda _: comp_set_group("press"))
+cbtn_all.on_clicked(lambda _:   comp_set_group("all"))
+cbtn_none.on_clicked(lambda _:  comp_set_group("none"))
+fig_comp.canvas.mpl_connect("pick_event", comp_on_legend_pick)
+
+comp_redraw()
+plt.show()
+
+# ── Save prompt ───────────────────────────────────────────────────────────────
+print(f"\n  Output files that will be saved:")
+print(f"    TXT : {out_path}")
+print(f"    PNG : {base + '_clean_report.png'}")
+
+while True:
+    save_choice = input("\n  Save output files?  [Y] Yes  /  [N] Discard: ").strip().upper()
+    if save_choice in ("Y", "N"):
+        break
+    print("  Enter Y or N.")
+
+if save_choice == "N":
+    print("\n  Discarded — no files saved.")
+    raise SystemExit(0)
+
 # ── Write output ──────────────────────────────────────────────────────────────
 out_df = pd.DataFrame(data_clean, columns=cols)
-out_df.insert(0, "time_s", time)
+out_df.insert(0, "time_s", time_aligned)
 
 with open(out_path, "w") as f:
     f.write("\t".join(out_df.columns) + "\n")
     for row in out_df.itertuples(index=False):
         f.write("\t".join(f"{v:.6f}" for v in row) + "\n")
 
-print(f"Clean file saved: {out_path}")
+print(f"\nClean file saved: {out_path}")
+print(f"  Rows       : {N:,}")
+print(f"  Time range : 0.0000 s → {time_aligned[-1]:.4f} s")
 
-# ── Summary plot ──────────────────────────────────────────────────────────────
+# ── Summary report plot ───────────────────────────────────────────────────────
 try:
     combined_flags = spike_flags.any(axis=1)
 
@@ -521,27 +609,27 @@ try:
     ch_idx  = next((k for k, c in enumerate(cols) if c.startswith("DCDT_")), 0)
     ch_name = cols[ch_idx]
 
-    axes[0].plot(time, data[:, ch_idx],       color="tomato",    lw=0.6, label="Original")
-    axes[0].plot(time, data_clean[:, ch_idx], color="steelblue", lw=0.6, label="Cleaned", alpha=0.8)
-    if use_cycle and cycle_start_idx > 0:
-        axes[0].axvline(time[cycle_start_idx], color="green", lw=1.2, ls="--",
-                        label=f"Cycle anchor ({time[cycle_start_idx]:.2f} s)")
-    for t in time[spike_flags[:, ch_idx]]:
+    axes[0].plot(time_aligned, data[:, ch_idx],       color="tomato",    lw=0.6, label="Original")
+    axes[0].plot(time_aligned, data_clean[:, ch_idx], color="steelblue", lw=0.6, label="Cleaned", alpha=0.8)
+    axes[0].axvline(time_aligned[cycle_start_idx], color="darkorange", lw=1.2, ls="--",
+                    label=f"Cycle anchor (t = {time_aligned[cycle_start_idx]:.2f} s)")
+    for t in time_aligned[spike_flags[:, ch_idx]]:
         axes[0].axvline(t, color="red", lw=0.5, alpha=0.3)
     axes[0].set_ylabel("Value")
-    axes[0].set_title(f"{ch_name}  (red = corrected spikes,  green = cycle anchor)")
+    axes[0].set_title(f"{ch_name}  (red = corrected,  orange = cycle anchor)")
     axes[0].legend(fontsize=8)
 
-    axes[1].fill_between(time, combined_flags.astype(int), color="red", alpha=0.6, step="mid")
+    axes[1].fill_between(time_aligned, combined_flags.astype(int),
+                         color="red", alpha=0.6, step="mid")
     axes[1].set_ylabel("Spike flag\n(any channel)")
     axes[1].set_xlabel("Time (s)")
     axes[1].set_ylim(-0.1, 1.5)
-    axes[1].set_title("Spike locations across full test (any channel)")
+    axes[1].set_title("Corrected locations across full test (any channel)")
 
     plt.tight_layout()
     plot_path = base + "_clean_report.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     print(f"Report plot saved: {plot_path}")
     plt.show()
-except ImportError:
+except Exception:
     pass
