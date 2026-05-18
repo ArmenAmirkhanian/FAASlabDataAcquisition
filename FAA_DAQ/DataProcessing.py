@@ -20,8 +20,10 @@ SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file a
 HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
-RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-RECORD_SAMPLES   = 160160     # Samples to record after ramp (10000 s cyclic + 10 s end ramp × 16 Hz), then auto-stop and save
+START_RAMP_SECONDS = 10       # Start ramp duration (seconds) — averaged for 1 kip baseline
+RECORD_SECONDS   = 10000      # Duration of cyclic recording (seconds)
+END_RAMP_SECONDS = 10         # End ramp to keep after cyclic recording (seconds)
+RECORD_SAMPLES   = round((RECORD_SECONDS + END_RAMP_SECONDS) * SAMPLE_RATE)
 # Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)
 # ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
 # ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
@@ -66,6 +68,7 @@ def smooth(y):
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
     gc.disable()
+    RAMP_SAMPLES = round(START_RAMP_SECONDS * SAMPLE_RATE)
     with nidaqmx.Task() as strain_task, \
          nidaqmx.Task() as voltage_task:
 
