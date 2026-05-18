@@ -135,11 +135,11 @@ root = tk.Tk()
 root.withdraw()
 
 in_paths = filedialog.askopenfilenames(
-    title="Select raw data files to merge (data_raw_*.txt)",
+    title="Select trimmed files to merge (*_trimmed.txt)",
     initialdir=os.path.dirname(os.path.abspath(__file__)),
-    filetypes=[("Raw data files", "data_raw_*.txt"),
-               ("Text files",     "*.txt"),
-               ("All files",      "*.*")]
+    filetypes=[("Trimmed files", "*_trimmed.txt"),
+               ("Text files",    "*.txt"),
+               ("All files",     "*.*")]
 )
 
 if not in_paths:
