@@ -120,7 +120,7 @@ def run_acquisition():
         output_sample_count = 0
 
         # Ramp tare accumulators
-        ramp_strain    = [0.0] * 8
+        ramp_strain    = [0.0] * 10
         ramp_disp_in   = [0.0] * 12
         ramp_press_kpa = [0.0] * 4
         ramp_collected = 0
@@ -187,14 +187,14 @@ def run_acquisition():
         # Rolling window for live plots — last 1 minute of data
         PLOT_WINDOW = 60 * SAMPLE_RATE     # 960 points at 16 Hz
         t_data      = deque(maxlen=PLOT_WINDOW)
-        strain_plot = [deque(maxlen=PLOT_WINDOW) for _ in range(8)]
+        strain_plot = [deque(maxlen=PLOT_WINDOW) for _ in range(10)]
         disp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(12)]
         press_plot  = [deque(maxlen=PLOT_WINDOW) for _ in range(4)]
         b2bot_plot  = deque(maxlen=PLOT_WINDOW)
 
         # Full dataset retained in memory for end-of-test plot saves
         t_full      = []
-        strain_full = [[] for _ in range(8)]
+        strain_full = [[] for _ in range(10)]
         disp_full   = [[] for _ in range(12)]
         press_full  = [[] for _ in range(4)]
         b2bot_full  = []
@@ -203,7 +203,7 @@ def run_acquisition():
         ax1.set_title("Strain (tared)")
         ax1.set_xlabel("Time (s)")
         ax1.set_ylabel("Strain (microstrain)")
-        strain_lines = [ax1.plot([], [], label=strain_names[i])[0] for i in range(8)]
+        strain_lines = [ax1.plot([], [], label=strain_names[i])[0] for i in range(10)]
         ax1.legend(fontsize=6, loc="upper left")
 
         # Plot 2: Time vs Displacement (processed, in)
@@ -258,7 +258,7 @@ def run_acquisition():
 
                 # Both tasks read DOWNSAMPLE=61 samples per loop at 974 Hz (shared clock)
                 # Average all 61 → 1 output value per channel at effective 16 Hz
-                strain_raw = [sum(strain_data[i])  / DOWNSAMPLE for i in range(8)]
+                strain_raw = [sum(strain_data[i])  / DOWNSAMPLE for i in range(10)]
                 disp_raw   = [sum(voltage_data[i]) / DOWNSAMPLE for i in range(12)]
                 v17 = sum(voltage_data[12]) / DOWNSAMPLE
                 v18 = sum(voltage_data[13]) / DOWNSAMPLE
@@ -282,7 +282,7 @@ def run_acquisition():
 
                 # ── Phase A: collect ramp samples for baseline ────
                 if ramp_collected < RAMP_SAMPLES:
-                    for i in range(8):
+                    for i in range(10):
                         ramp_strain[i]    += strain_raw[i]
                     for i in range(12):
                         ramp_disp_in[i]   += disp_in[i]
@@ -317,7 +317,7 @@ def run_acquisition():
                         for (bt, bd, bp, bs) in proc_buffer:
                             d_tared = [bd[i] - baseline_disp_in[i]   for i in range(12)]
                             p_tared = [(bp[i] - baseline_press_kpa[i]) * KPA_TO_PSI for i in range(4)]
-                            s_tared = [bs[i] - baseline_strain[i]    for i in range(8)]
+                            s_tared = [bs[i] - baseline_strain[i]    for i in range(10)]
                             proc_row = [f"{bt:.6f}"] + \
                                        [f"{v:.6f}" for v in d_tared] + \
                                        [f"{v:.6f}" for v in p_tared] + \
@@ -332,7 +332,7 @@ def run_acquisition():
                     print(f"\nRecording complete ({RECORD_SAMPLES} samples). Auto-stopping...")
                     raise KeyboardInterrupt
 
-                strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(8)]
+                strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(10)]
                 disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
                 press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
                 press_tared_psi = [v * KPA_TO_PSI for v in press_tared_kpa]
@@ -359,7 +359,7 @@ def run_acquisition():
 
                 t_data.append(t)
                 t_full.append(t)
-                for i in range(8):
+                for i in range(10):
                     strain_plot[i].append(strain_tared[i])
                     strain_full[i].append(strain_tared[i])
                 for i in range(12):
