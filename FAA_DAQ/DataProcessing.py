@@ -20,10 +20,8 @@ SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file a
 HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
-START_RAMP_SECONDS = 10       # Start ramp duration (seconds) — averaged for 1 kip baseline
-RECORD_SECONDS   = 10000      # Duration of cyclic recording (seconds)
-END_RAMP_SECONDS = 10         # End ramp to keep after cyclic recording (seconds)
-RECORD_SAMPLES   = round((RECORD_SECONDS + END_RAMP_SECONDS) * SAMPLE_RATE)
+RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
+RECORD_SAMPLES   = 160160     # Samples to record after ramp (10000 s cyclic + 10 s end ramp × 16 Hz), then auto-stop and save
 # Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)
 # ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
 # ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
@@ -68,7 +66,6 @@ def smooth(y):
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
     gc.disable()
-    RAMP_SAMPLES = round(START_RAMP_SECONDS * SAMPLE_RATE)
     with nidaqmx.Task() as strain_task, \
          nidaqmx.Task() as voltage_task:
 
@@ -102,16 +99,10 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates (shared clock: NI-9205 as master) --
-        # Voltage task runs as master — NI-9205 has no minimum rate restriction
-        # Strain task slaves to voltage module SampleClock — hardware-level sync
-        # Both tasks tick on the exact same pulse; eliminates drift between DCDT/pressure and strain
+        # -- Set sample rates — 30s buffer reduces DAQmx circular-buffer wrap glitches --
+        # NI-9235 does not expose SampleClock; both tasks run independently
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
         voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
-        strain_task.timing.cfg_samp_clk_timing(
-            HW_RATE,
-            source=f"/{VOLTAGE_MODULE}/SampleClock",
-            samps_per_chan=HW_RATE * 3600
-        )
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
