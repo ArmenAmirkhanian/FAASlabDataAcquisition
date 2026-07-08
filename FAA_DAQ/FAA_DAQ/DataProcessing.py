@@ -1,3 +1,4 @@
+import gc
 import nidaqmx
 from nidaqmx.constants import (BridgeConfiguration,
                                 ExcitationSource,
@@ -18,10 +19,28 @@ STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
 HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
-WALK_COUNTDOWN   = 10         # Seconds countdown before recording — time to walk to MTS
+WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-DISP_SCALE       = 3.937 / 10.0  # V → inches (0 V = 0 in, 10 V = 3.937 in)
-KPA_TO_KSI       = 0.000145038   # kPa → ksi conversion
+RECORD_SAMPLES   = 160160     # Samples to record after ramp (10000 s cyclic + 10 s end ramp × 16 Hz), then auto-stop and save
+# Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)
+# ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
+# ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
+# ai11:                       1 in stroke  (10 V = 0.9843 in)
+DISP_SCALE = [
+    3.937 / 10.0,   # ai0  DCDT_Right_Slab_A1
+    3.937 / 10.0,   # ai1  DCDT_Right_Slab_A2
+    3.937 / 10.0,   # ai2  DCDT_Right_Slab_A3
+    3.937 / 10.0,   # ai3  DCDT_Right_Slab_B1
+    1.969 / 10.0,   # ai4  DCDT_Right_Slab_B3
+    3.937 / 10.0,   # ai5  DCDT_Left_Slab_B1
+    3.937 / 10.0,   # ai6  DCDT_Left_Slab_B2_Bot
+    1.969 / 10.0,   # ai7  DCDT_Left_Slab_B3
+    3.937 / 10.0,   # ai8  DCDT_Left_Slab_C1
+    3.937 / 10.0,   # ai9  DCDT_Left_Slab_C2
+    3.937 / 10.0,   # ai10 DCDT_Left_Slab_C3
+    0.9843 / 10.0,  # ai11 DCDT_Beam_B2_Top
+]
+KPA_TO_PSI       = 0.145038      # kPa → psi conversion
 
 # ─── PRESSURE CONVERSION FORMULAS (one per channel) ──────────
 def process_soil_plate_pressure(raw):
@@ -46,11 +65,12 @@ def smooth(y):
 
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
+    gc.disable()
     with nidaqmx.Task() as strain_task, \
          nidaqmx.Task() as voltage_task:
 
-        # -- Strain channels (NI-9235, Slot 2, 8 channels) --
-        for ch in range(8):
+        # -- Strain channels (NI-9235, Slot 2, 10 channels) --
+        for ch in range(10):
             strain_task.ai_channels.add_ai_strain_gage_chan(
                 f"{STRAIN_MODULE}/ai{ch}",
                 gage_factor=2.0,              # Update with your gauge factor
@@ -79,10 +99,10 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates — large buffer (10s) to absorb plotting/IO delays --
+        # -- Set sample rates — 30s buffer reduces DAQmx circular-buffer wrap glitches --
         # NI-9235 does not expose SampleClock; both tasks run independently
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
-        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 10)
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
+        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
@@ -108,6 +128,7 @@ def run_acquisition():
         # Buffer for processed rows during ramp (can't tare until ramp ends)
         proc_buffer = []
         plot_counter = 0
+        cyclic_sample_count = 0   # counts Phase B samples toward RECORD_SAMPLES
 
         # Auto-zero detection: skip samples where any displacement channel
         # jumps more than this threshold in one sample (NI-9235 calibration artifact)
@@ -124,7 +145,7 @@ def run_acquisition():
         cal_file  = open(cal_filename,  'w')
 
         strain_names = [
-            "SG_2E_top", "SG_3E_top", "SG_4E_top", "SG_4E_bot",
+            "SG_1E_top", "SG_2E_top", "SG_3E_top", "SG_3E_bot", "SG_4E_top", "SG_4E_bot",
             "SG_5E_top", "SG_5E_bot", "SG_6E_top", "SG_7E_top"
         ]
         disp_names = [
@@ -138,14 +159,14 @@ def run_acquisition():
         raw_header = (
             ["time_s"] +
             disp_names +
-            ["volt_ch17", "volt_ch18", "volt_ch19", "volt_ch20"] +
+            ["Soil_plate_volt_ch17", "Agg_plate_volt_ch18", "Soil_pore_water_volt_ch19", "Agg_pore_water_volt_ch20"] +
             strain_names
         )
         proc_header = (
             ["time_s"] +
             disp_names +
-            ["soil_plate_pressure_ksi", "agg_plate_pressure_ksi",
-             "soil_pore_water_pressure_ksi", "agg_pore_water_pressure_ksi"] +
+            ["soil_plate_pressure_psi", "agg_plate_pressure_psi",
+             "soil_pore_water_pressure_psi", "agg_pore_water_pressure_psi"] +
             strain_names
         )
         cal_header = (
@@ -163,8 +184,8 @@ def run_acquisition():
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8))
         fig.suptitle("Live DAQ Data")
 
-        # Rolling window for live plots — last 1 hour of data
-        PLOT_WINDOW = 3600 * SAMPLE_RATE   # 57,600 points at 16 Hz
+        # Rolling window for live plots — last 1 minute of data
+        PLOT_WINDOW = 60 * SAMPLE_RATE     # 960 points at 16 Hz
         t_data      = deque(maxlen=PLOT_WINDOW)
         strain_plot = [deque(maxlen=PLOT_WINDOW) for _ in range(8)]
         disp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(12)]
@@ -189,23 +210,37 @@ def run_acquisition():
         ax2.set_title("Displacement - Processed")
         ax2.set_xlabel("Time (s)")
         ax2.set_ylabel("Displacement (in)")
-        disp_lines = [ax2.plot([], [], label=disp_names[i])[0] for i in range(12)]
+        disp_colors = [
+            '#1f77b4',  # 0  Right_Slab_A1  - blue
+            '#ff7f0e',  # 1  Right_Slab_A2  - orange
+            '#2ca02c',  # 2  Right_Slab_A3  - green
+            '#d62728',  # 3  Right_Slab_B1  - red
+            '#9467bd',  # 4  Right_Slab_B3  - purple
+            '#8c564b',  # 5  Left_Slab_B1   - brown
+            '#e377c2',  # 6  Left_Slab_B2_Bot - pink
+            '#7f7f7f',  # 7  Left_Slab_B3   - gray
+            '#bcbd22',  # 8  Left_Slab_C1   - olive
+            '#17becf',  # 9  Left_Slab_C2   - teal
+            '#f0027f',  # 10 Left_Slab_C3   - magenta
+            '#000000',  # 11 Beam_B2_Top    - black
+        ]
+        disp_lines = [ax2.plot([], [], label=disp_names[i], color=disp_colors[i])[0] for i in range(12)]
         ax2.legend(fontsize=6, loc="upper left")
 
-        # Plot 3: Time vs Pressure (processed, ksi)
+        # Plot 3: Time vs Pressure (processed, psi)
         press_labels = ["Soil Plate", "Agg Plate", "Soil Pore Water", "Agg Pore Water"]
         ax3.set_title("Pressure - Processed")
         ax3.set_xlabel("Time (s)")
-        ax3.set_ylabel("Pressure (ksi)")
+        ax3.set_ylabel("Pressure (psi)")
         press_lines = [ax3.plot([], [], label=press_labels[i])[0] for i in range(4)]
         ax3.legend(fontsize=7, loc="upper left")
 
-        # Plot 4: Pressure (ksi) vs Displacement (in)
+        # Plot 4: Pressure (psi) vs Displacement (in)
         ax4.set_title("Pressure vs DCDT_Left_Slab_B2_Bot")
         ax4.set_xlabel("DCDT_Left_Slab_B2_Bot (in)")
-        ax4.set_ylabel("Pressure (ksi)")
-        soil_plate_line, = ax4.plot([], [], label="Soil Plate Pressure (ksi)")
-        agg_plate_line,  = ax4.plot([], [], label="Agg Plate Pressure (ksi)")
+        ax4.set_ylabel("Pressure (psi)")
+        soil_plate_line, = ax4.plot([], [], label="Soil Plate Pressure (psi)")
+        agg_plate_line,  = ax4.plot([], [], label="Agg Plate Pressure (psi)")
         ax4.legend(fontsize=7, loc="upper left")
 
         plt.tight_layout()
@@ -238,11 +273,12 @@ def run_acquisition():
                 prev_disp_raw = disp_raw
 
                 # ── Step 2: Convert raw to physical units ─────────
-                disp_in   = [v * DISP_SCALE for v in disp_raw]
-                press_kpa = [process_soil_plate_pressure(v17),
-                             process_agg_plate_pressure(v18),
-                             process_soil_pore_water_pressure(v19),
-                             process_agg_pore_water_pressure(v20)]
+                disp_in   = [disp_raw[i] * DISP_SCALE[i] for i in range(12)]
+                # Pressure formulas expect millivolts — convert from volts first
+                press_kpa = [process_soil_plate_pressure(v17 * 1000),
+                             process_agg_plate_pressure(v18 * 1000),
+                             process_soil_pore_water_pressure(v19 * 1000),
+                             process_agg_pore_water_pressure(v20 * 1000)]
 
                 # ── Phase A: collect ramp samples for baseline ────
                 if ramp_collected < RAMP_SAMPLES:
@@ -280,7 +316,7 @@ def run_acquisition():
                         print(f"\nRamp complete. Baseline set at 1 kip. Cyclic recording started.")
                         for (bt, bd, bp, bs) in proc_buffer:
                             d_tared = [bd[i] - baseline_disp_in[i]   for i in range(12)]
-                            p_tared = [(bp[i] - baseline_press_kpa[i]) * KPA_TO_KSI for i in range(4)]
+                            p_tared = [(bp[i] - baseline_press_kpa[i]) * KPA_TO_PSI for i in range(4)]
                             s_tared = [bs[i] - baseline_strain[i]    for i in range(8)]
                             proc_row = [f"{bt:.6f}"] + \
                                        [f"{v:.6f}" for v in d_tared] + \
@@ -291,10 +327,15 @@ def run_acquisition():
                     continue
 
                 # ── Phase B: cyclic recording — baseline ready ────
+                cyclic_sample_count += 1
+                if cyclic_sample_count >= RECORD_SAMPLES:
+                    print(f"\nRecording complete ({RECORD_SAMPLES} samples). Auto-stopping...")
+                    raise KeyboardInterrupt
+
                 strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(8)]
                 disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
                 press_tared_kpa = [press_kpa[i]  - baseline_press_kpa[i] for i in range(4)]
-                press_tared_ksi = [v * KPA_TO_KSI for v in press_tared_kpa]
+                press_tared_psi = [v * KPA_TO_PSI for v in press_tared_kpa]
 
                 output_sample_count += 1
                 t = output_sample_count / SAMPLE_RATE
@@ -312,7 +353,7 @@ def run_acquisition():
 
                 proc_row = [f"{t:.6f}"] + \
                            [f"{v:.6f}" for v in disp_tared] + \
-                           [f"{v:.6f}" for v in press_tared_ksi] + \
+                           [f"{v:.6f}" for v in press_tared_psi] + \
                            [f"{v:.6f}" for v in strain_tared]
                 proc_file.write("\t".join(proc_row) + "\n")
 
@@ -325,8 +366,8 @@ def run_acquisition():
                     disp_plot[i].append(disp_tared[i])
                     disp_full[i].append(disp_tared[i])
                 for i in range(4):
-                    press_plot[i].append(press_tared_ksi[i])
-                    press_full[i].append(press_tared_ksi[i])
+                    press_plot[i].append(press_tared_psi[i])
+                    press_full[i].append(press_tared_psi[i])
                 b2bot_plot.append(disp_tared[6])
                 b2bot_full.append(disp_tared[6])
 
@@ -354,6 +395,7 @@ def run_acquisition():
 
 
         except KeyboardInterrupt:
+            gc.enable()
             print("\nAcquisition stopped.")
             raw_file.close()
             proc_file.close()
