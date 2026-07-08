@@ -1,4 +1,5 @@
 import gc
+import ctypes
 import nidaqmx
 from nidaqmx.constants import (BridgeConfiguration,
                                 ExcitationSource,
@@ -14,14 +15,15 @@ import os
 from collections import deque
 
 # ─── CONFIGURATION ────────────────────────────────────────────
-VOLTAGE_MODULE = "cDAQ1Mod1"  # Slot 1: NI-9205 (displacement + pressure)
-STRAIN_MODULE  = "cDAQ1Mod2"  # Slot 2: NI-9235 (strain gauges)
+VOLTAGE_MODULE  = "cDAQ2Mod1"  # Slot 1: NI-9205 (displacement + pressure)
+STRAIN_MODULE_A = "cDAQ2Mod2"  # Slot 2: NI-9235 (strain ai0–ai7, 8 channels)
+STRAIN_MODULE_B = "cDAQ2Mod3"  # Slot 3: NI-9235 (strain ai0–ai1, 2 channels)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
 HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-RECORD_SAMPLES   = 160160     # Samples to record after ramp (10000 s cyclic + 10 s end ramp × 16 Hz), then auto-stop and save
+RECORD_SAMPLES   = 288000     # Samples to record (5 hours × 3600 s × 16 Hz), then auto-stop and save
 # Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)
 # ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
 # ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
@@ -66,19 +68,34 @@ def smooth(y):
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
     gc.disable()
+    # Prevent Windows from sleeping or turning off the display during acquisition
+    ES_CONTINUOUS      = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+
     with nidaqmx.Task() as strain_task, \
          nidaqmx.Task() as voltage_task:
 
-        # -- Strain channels (NI-9235, Slot 2, 10 channels) --
-        for ch in range(10):
+        # -- Strain channels: ai0-ai7 on Mod2, ai0-ai1 on Mod3 --
+        for ch in range(8):
             strain_task.ai_channels.add_ai_strain_gage_chan(
-                f"{STRAIN_MODULE}/ai{ch}",
-                gage_factor=2.0,              # Update with your gauge factor
+                f"{STRAIN_MODULE_A}/ai{ch}",
+                gage_factor=2.0,
                 initial_bridge_voltage=0.0,
                 strain_config=StrainGageBridgeType.QUARTER_BRIDGE_I,
                 voltage_excit_source=ExcitationSource.INTERNAL,
                 voltage_excit_val=2.0,
-                nominal_gage_resistance=120.0  # 120 ohm as per your hardware
+                nominal_gage_resistance=120.0
+            )
+        for ch in range(2):
+            strain_task.ai_channels.add_ai_strain_gage_chan(
+                f"{STRAIN_MODULE_B}/ai{ch}",
+                gage_factor=2.0,
+                initial_bridge_voltage=0.0,
+                strain_config=StrainGageBridgeType.QUARTER_BRIDGE_I,
+                voltage_excit_source=ExcitationSource.INTERNAL,
+                voltage_excit_val=2.0,
+                nominal_gage_resistance=120.0
             )
 
         # -- Displacement + Pressure channels combined in one task (NI-9205, Slot 1) --
@@ -99,10 +116,9 @@ def run_acquisition():
                 max_val=10.0
             )
 
-        # -- Set sample rates — 30s buffer reduces DAQmx circular-buffer wrap glitches --
-        # NI-9235 does not expose SampleClock; both tasks run independently
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
-        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 3600)
+        # -- Set sample rates (both tasks share the Armen chassis 100 MHz timebase) --
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 18000)
+        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 18000)
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
@@ -129,11 +145,6 @@ def run_acquisition():
         proc_buffer = []
         plot_counter = 0
         cyclic_sample_count = 0   # counts Phase B samples toward RECORD_SAMPLES
-
-        # Auto-zero detection: skip samples where any displacement channel
-        # jumps more than this threshold in one sample (NI-9235 calibration artifact)
-        AUTOZERO_THRESHOLD = 0.3   # volts — any jump larger than this is flagged
-        prev_disp_raw = None       # updated only on accepted samples
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -245,6 +256,12 @@ def run_acquisition():
 
         plt.tight_layout()
         plt.show(block=False)
+
+        # All three modules share the cDAQ-9173 chassis 100 MHz backplane timebase
+        # so their sample clocks cannot drift. Starting back-to-back gives <1 ms offset.
+        strain_task.start()
+        voltage_task.start()
+
         try:
             while True:
                 # Read voltage channels (16 Hz) and strain channels (974 Hz, then average)
@@ -264,13 +281,6 @@ def run_acquisition():
                 v18 = sum(voltage_data[13]) / DOWNSAMPLE
                 v19 = sum(voltage_data[14]) / DOWNSAMPLE
                 v20 = sum(voltage_data[15]) / DOWNSAMPLE
-
-                # ── Auto-zero detection: skip NI-9235 calibration glitches ──
-                if prev_disp_raw is not None:
-                    if any(abs(disp_raw[i] - prev_disp_raw[i]) > AUTOZERO_THRESHOLD
-                           for i in range(12)):
-                        continue   # discard this sample entirely
-                prev_disp_raw = disp_raw
 
                 # ── Step 2: Convert raw to physical units ─────────
                 disp_in   = [disp_raw[i] * DISP_SCALE[i] for i in range(12)]
@@ -396,6 +406,7 @@ def run_acquisition():
 
         except KeyboardInterrupt:
             gc.enable()
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)  # restore normal power management
             print("\nAcquisition stopped.")
             raw_file.close()
             proc_file.close()
