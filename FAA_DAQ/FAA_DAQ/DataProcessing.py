@@ -108,7 +108,7 @@ def run_acquisition():
                 min_val=0,
                 max_val=10.0
             )
-        for ch in [17, 18, 19, 20]:
+        for ch in [20, 21, 22, 23]:
             voltage_task.ai_channels.add_ai_voltage_chan(
                 f"{VOLTAGE_MODULE}/ai{ch}",
                 terminal_config=TerminalConfiguration.DIFF,
