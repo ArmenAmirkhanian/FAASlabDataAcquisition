@@ -40,11 +40,12 @@ SAMPLE_RATE    = 16      # Hz
 CYCLE_HZ       = 1.0    # Hz
 RAMP_SECONDS   = 5.0    # seconds to skip at start (not cyclic)
 GAP_TOLERANCE  = 3      # flag gaps < SPC - GAP_TOLERANCE  (i.e. < 13 for SPC=16)
-MIN_CH_CONFIRM = 1      # DCDT channels that must agree on an event
+MIN_CH_CONFIRM = 2      # DCDT channels that must agree on an event
 MERGE_WINDOW   = 6      # rows: detections within this window → single event
                         # DCDT inter-channel spread for same event: ≤ 4-5 rows
                         # consecutive bad-cycle separation:         ≥ 7 rows (SPC-max_miss)
                         # → 6 groups same-event channels while separating consecutive
+USE_AGGREGATE_DETECTION = True
 
 WINDOW_S  = 20.0        # seconds visible in review plot
 MARKER_MS = 4
@@ -124,27 +125,42 @@ def find_upcrossings(signal, level):
 GAP_MAX    = SPC - GAP_TOLERANCE     # flag gaps shorter than this (e.g. < 13)
 raw_events = []    # (cycle_start, cycle_end, n_missing, channel_name)
 
-for ch_i in det_idx:
-    sig = data[:, ch_i]
-
-    # Crossing level = midpoint of oscillation in the cyclic portion
-    cyc   = sig[RAMP_ROWS:]
+if USE_AGGREGATE_DETECTION and len(det_idx) > 1:
+    sig = np.mean(data[:, det_idx], axis=1)
+    cyc = sig[RAMP_ROWS:]
     level = (float(np.percentile(cyc, 5)) + float(np.percentile(cyc, 95))) / 2.0
-
-    # Find all upward crossings in the cyclic portion, shift back to full indices
     xings = find_upcrossings(cyc, level) + RAMP_ROWS
-
     for j in range(1, len(xings)):
         gap = xings[j] - xings[j - 1]
         if 0 < gap < GAP_MAX:
             n_miss      = int(round(SPC - gap))
-            cycle_start = int(round(xings[j - 1]))   # start of compressed cycle
-            cycle_end   = int(round(xings[j]))        # end   of compressed cycle
+            cycle_start = int(round(xings[j - 1]))
+            cycle_end   = int(round(xings[j]))
             if n_miss > 0:
-                raw_events.append((cycle_start, cycle_end, n_miss, cols[ch_i]))
+                raw_events.append((cycle_start, cycle_end, n_miss, "AGG"))
+    print(f"\nRaw detections : {len(raw_events)}  (aggregate DCDT detection)")
+else:
+    for ch_i in det_idx:
+        sig = data[:, ch_i]
 
-print(f"\nRaw detections : {len(raw_events)}"
-      f"  ({len(det_idx)} DCDT channels, upward zero-crossings)")
+        # Crossing level = midpoint of oscillation in the cyclic portion
+        cyc   = sig[RAMP_ROWS:]
+        level = (float(np.percentile(cyc, 5)) + float(np.percentile(cyc, 95))) / 2.0
+
+        # Find all upward crossings in the cyclic portion, shift back to full indices
+        xings = find_upcrossings(cyc, level) + RAMP_ROWS
+
+        for j in range(1, len(xings)):
+            gap = xings[j] - xings[j - 1]
+            if 0 < gap < GAP_MAX:
+                n_miss      = int(round(SPC - gap))
+                cycle_start = int(round(xings[j - 1]))   # start of compressed cycle
+                cycle_end   = int(round(xings[j]))        # end   of compressed cycle
+                if n_miss > 0:
+                    raw_events.append((cycle_start, cycle_end, n_miss, cols[ch_i]))
+
+    print(f"\nRaw detections : {len(raw_events)}"
+          f"  ({len(det_idx)} DCDT channels, upward zero-crossings)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
