@@ -54,13 +54,14 @@ print(f"Channels : {len(cols)}")
 print(f"Duration : {time[-1]:.2f} s  ({time[-1]/60:.1f} min)")
 
 # ── Channel color and group detection ────────────────────────────────────────
-def ch_color(c):
-    if c.startswith("DCDT_"):                               return "steelblue"
-    if c.startswith("SG_"):                                 return "tomato"
-    if "pressure" in c.lower() or c.startswith("volt_ch"): return "darkorange"
-    return "gray"
-
-colors = [ch_color(c) for c in cols]
+_PALETTE = [
+    "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+    "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf",
+    "#aec7e8","#ffbb78","#98df8a","#ff9896","#c5b0d5",
+    "#c49c94","#f7b6d2","#c7c7c7","#dbdb8d","#9edae5",
+    "#393b79","#637939","#8c6d31","#843c39",
+]
+colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(cols))]
 vis    = [c.startswith("DCDT_") or c.startswith("volt_ch") for c in cols]
 if not any(vis):
     vis = [True] + [False] * (len(cols) - 1)
@@ -85,7 +86,9 @@ btn_sg    = Button(fig.add_axes([bx, 0.75, bw, bh]), "Strain",   color="#ffd0d0"
 btn_press = Button(fig.add_axes([bx, 0.70, bw, bh]), "Pressure", color="#ffe0b0", hovercolor="#ffc870")
 btn_all   = Button(fig.add_axes([bx, 0.65, bw, bh]), "All on",   color="#d0ffd0", hovercolor="#b0ffb0")
 btn_none  = Button(fig.add_axes([bx, 0.60, bw, bh]), "All off",  color="#e8e8e8", hovercolor="#d0d0d0")
-for btn in (btn_dcdt, btn_sg, btn_press, btn_all, btn_none):
+btn_next = Button(fig.add_axes([bx, 0.55, bw, bh]), f"Next {WINDOW_S:g}s", color="#dde8ff", hovercolor="#bbd0ff")
+btn_prev = Button(fig.add_axes([bx, 0.50, bw, bh]), f"Prev {WINDOW_S:g}s", color="#dde8ff", hovercolor="#bbd0ff")
+for btn in (btn_dcdt, btn_sg, btn_press, btn_all, btn_none, btn_next, btn_prev):
     btn.label.set_fontsize(7)
 
 t_max_sl = max(float(time[-1]) - WINDOW_S, 0.01)
@@ -151,12 +154,17 @@ def on_legend_pick(event):
     vis[idx] = not vis[idx]
     redraw(keep_xlim=True)
 
+def do_next(_): slider.set_val(min(slider.val + WINDOW_S, t_max_sl))
+def do_prev(_): slider.set_val(max(slider.val - WINDOW_S, 0.0))
+
 slider.on_changed(redraw)
 btn_dcdt.on_clicked(lambda _:  set_group("dcdt"))
 btn_sg.on_clicked(lambda _:    set_group("sg"))
 btn_press.on_clicked(lambda _: set_group("press"))
 btn_all.on_clicked(lambda _:   set_group("all"))
 btn_none.on_clicked(lambda _:  set_group("none"))
+btn_next.on_clicked(do_next)
+btn_prev.on_clicked(do_prev)
 fig.canvas.mpl_connect("pick_event", on_legend_pick)
 
 redraw()

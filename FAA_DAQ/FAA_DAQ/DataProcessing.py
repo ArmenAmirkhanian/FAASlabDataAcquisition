@@ -23,7 +23,10 @@ HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 mini
 DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-RECORD_SAMPLES   = 288000     # Samples to record (5 hours × 3600 s × 16 Hz), then auto-stop and save
+RECORD_SECONDS   = 30000       # Steady-state recording duration (10 hour) before ramp-down
+RAMPDOWN_SECONDS = 10         # Final ramp-down window recorded before auto-stop
+RECORD_SAMPLES   = RECORD_SECONDS * SAMPLE_RATE      # Phase B sample count that triggers the ramp-down prompt
+RAMPDOWN_SAMPLES = RAMPDOWN_SECONDS * SAMPLE_RATE    # Additional Phase B samples recorded after the prompt
 # Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)
 # ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
 # ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
@@ -39,7 +42,7 @@ DISP_SCALE = [
     1.969 / 10.0,   # ai7  DCDT_Left_Slab_B3
     3.937 / 10.0,   # ai8  DCDT_Left_Slab_C1
     3.937 / 10.0,   # ai9  DCDT_Left_Slab_C2
-    3.937 / 10.0,   # ai10 DCDT_Left_Slab_C3
+    1.969 / 10.0,   # ai10 DCDT_Left_Slab_C3
     0.9843 / 10.0,  # ai11 DCDT_Beam_B2_Top
 ]
 KPA_TO_PSI       = 0.145038      # kPa → psi conversion
@@ -144,7 +147,8 @@ def run_acquisition():
         # Buffer for processed rows during ramp (can't tare until ramp ends)
         proc_buffer = []
         plot_counter = 0
-        cyclic_sample_count = 0   # counts Phase B samples toward RECORD_SAMPLES
+        cyclic_sample_count = 0   # counts Phase B samples toward RECORD_SAMPLES + RAMPDOWN_SAMPLES
+        rampdown_announced  = False
 
         # Open raw, processed, and calibrated text files, write headers
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -338,8 +342,11 @@ def run_acquisition():
 
                 # ── Phase B: cyclic recording — baseline ready ────
                 cyclic_sample_count += 1
-                if cyclic_sample_count >= RECORD_SAMPLES:
-                    print(f"\nRecording complete ({RECORD_SAMPLES} samples). Auto-stopping...")
+                if not rampdown_announced and cyclic_sample_count >= RECORD_SAMPLES:
+                    rampdown_announced = True
+                    print(f"\n{RECORD_SECONDS/3600:.0f} hour recording complete — ramp MTS down now!          ")
+                if cyclic_sample_count >= RECORD_SAMPLES + RAMPDOWN_SAMPLES:
+                    print(f"\nRamp-down complete. Auto-stopping...")
                     raise KeyboardInterrupt
 
                 strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(10)]
