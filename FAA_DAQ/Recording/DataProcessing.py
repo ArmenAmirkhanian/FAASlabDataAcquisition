@@ -120,8 +120,8 @@ def run_acquisition():
             )
 
         # -- Set sample rates (both tasks share the Armen chassis 100 MHz timebase) --
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 18000)
-        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 18000)
+        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 31000)
+        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE *31000)
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
