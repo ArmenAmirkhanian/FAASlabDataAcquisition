@@ -1,8 +1,10 @@
 import gc
 import ctypes
 import nidaqmx
-from nidaqmx.constants import (BridgeConfiguration,
+from nidaqmx.constants import (AcquisitionType,
+                                BridgeConfiguration,
                                 ExcitationSource,
+                                OverwriteMode,
                                 StrainGageBridgeType,
                                 TerminalConfiguration)
 from datetime import datetime
@@ -120,8 +122,18 @@ def run_acquisition():
             )
 
         # -- Set sample rates (both tasks share the Armen chassis 100 MHz timebase) --
-        strain_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE * 31000)
-        voltage_task.timing.cfg_samp_clk_timing(HW_RATE, samps_per_chan=HW_RATE *31000)
+        # CONTINUOUS mode: samps_per_chan is just the circular buffer size (~8.6 hr of
+        # slack here), not a hard sample ceiling — acquisition no longer stops on its own
+        # after a fixed count, however long the test runs.
+        strain_task.timing.cfg_samp_clk_timing(
+            HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * 31000)
+        voltage_task.timing.cfg_samp_clk_timing(
+            HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * 31000)
+
+        # Fail loudly instead of silently dropping samples if the read loop ever
+        # falls behind and the circular buffer fills.
+        strain_task.in_stream.overwrite  = OverwriteMode.DO_NOT_OVERWRITE_UNREAD_SAMPLES
+        voltage_task.in_stream.overwrite = OverwriteMode.DO_NOT_OVERWRITE_UNREAD_SAMPLES
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
@@ -144,20 +156,15 @@ def run_acquisition():
         ramp_press_kpa = [0.0] * 4
         ramp_collected = 0
 
-        # Buffer for processed rows during ramp (can't tare until ramp ends)
-        proc_buffer = []
         plot_counter = 0
         cyclic_sample_count = 0   # counts Phase B samples toward RECORD_SAMPLES + RAMPDOWN_SAMPLES
         rampdown_announced  = False
 
-        # Open raw, processed, and calibrated text files, write headers
+        # Open raw text file, write header — processed/calibrated values are computed
+        # in memory for live plotting only and reconstructed offline from the raw file
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         raw_filename  = f"data_raw_{ts}.txt"
-        proc_filename = f"data_processed_{ts}.txt"
-        cal_filename  = f"data_calibrated_{ts}.txt"
         raw_file  = open(raw_filename,  'w')
-        proc_file = open(proc_filename, 'w')
-        cal_file  = open(cal_filename,  'w')
 
         strain_names = [
             "SG_1E_top", "SG_2E_top", "SG_3E_top", "SG_3E_bot", "SG_4E_top", "SG_4E_bot",
@@ -177,22 +184,7 @@ def run_acquisition():
             ["Soil_plate_volt_ch17", "Agg_plate_volt_ch18", "Soil_pore_water_volt_ch19", "Agg_pore_water_volt_ch20"] +
             strain_names
         )
-        proc_header = (
-            ["time_s"] +
-            disp_names +
-            ["soil_plate_pressure_psi", "agg_plate_pressure_psi",
-             "soil_pore_water_pressure_psi", "agg_pore_water_pressure_psi"] +
-            strain_names
-        )
-        cal_header = (
-            ["time_s"] +
-            disp_names +
-            ["soil_plate_pressure_kPa", "agg_plate_pressure_kPa",
-             "soil_pore_water_pressure_kPa", "agg_pore_water_pressure_kPa"]
-        )
         raw_file.write("\t".join(raw_header)   + "\n")
-        proc_file.write("\t".join(proc_header) + "\n")
-        cal_file.write("\t".join(cal_header)   + "\n")
 
         # ── Live plot setup ───────────────────────────────────────
         plt.ion()
@@ -306,7 +298,7 @@ def run_acquisition():
                     ramp_press_kpa[3] += press_kpa[3]
                     ramp_collected += 1
 
-                    # Write raw and calibrated immediately
+                    # Write raw immediately
                     output_sample_count += 1
                     t = output_sample_count / SAMPLE_RATE
                     raw_row = [f"{t:.6f}"] + \
@@ -314,30 +306,13 @@ def run_acquisition():
                               [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
                               [f"{v:.6f}" for v in strain_raw]
                     raw_file.write("\t".join(raw_row) + "\n")
-                    cal_row = [f"{t:.6f}"] + \
-                              [f"{v:.6f}" for v in disp_in] + \
-                              [f"{v:.6f}" for v in press_kpa]
-                    cal_file.write("\t".join(cal_row) + "\n")
 
-                    # Buffer processed row (no baseline yet)
-                    proc_buffer.append((t, disp_in[:], press_kpa[:], strain_raw[:]))
-
-                    # Once ramp complete → lock baseline, flush buffered processed rows
+                    # Once ramp complete → lock baseline
                     if ramp_collected == RAMP_SAMPLES:
                         baseline_strain    = [round(v / RAMP_SAMPLES, 6) for v in ramp_strain]
                         baseline_disp_in   = [round(v / RAMP_SAMPLES, 6) for v in ramp_disp_in]
                         baseline_press_kpa = [round(v / RAMP_SAMPLES, 6) for v in ramp_press_kpa]
                         print(f"\nRamp complete. Baseline set at 1 kip. Cyclic recording started.")
-                        for (bt, bd, bp, bs) in proc_buffer:
-                            d_tared = [bd[i] - baseline_disp_in[i]   for i in range(12)]
-                            p_tared = [(bp[i] - baseline_press_kpa[i]) * KPA_TO_PSI for i in range(4)]
-                            s_tared = [bs[i] - baseline_strain[i]    for i in range(10)]
-                            proc_row = [f"{bt:.6f}"] + \
-                                       [f"{v:.6f}" for v in d_tared] + \
-                                       [f"{v:.6f}" for v in p_tared] + \
-                                       [f"{v:.6f}" for v in s_tared]
-                            proc_file.write("\t".join(proc_row) + "\n")
-                        proc_buffer.clear()
                     continue
 
                 # ── Phase B: cyclic recording — baseline ready ────
@@ -363,17 +338,6 @@ def run_acquisition():
                           [f"{v:.6f}" for v in strain_raw]
                 raw_file.write("\t".join(raw_row) + "\n")
 
-                cal_row = [f"{t:.6f}"] + \
-                          [f"{v:.6f}" for v in disp_in] + \
-                          [f"{v:.6f}" for v in press_kpa]
-                cal_file.write("\t".join(cal_row) + "\n")
-
-                proc_row = [f"{t:.6f}"] + \
-                           [f"{v:.6f}" for v in disp_tared] + \
-                           [f"{v:.6f}" for v in press_tared_psi] + \
-                           [f"{v:.6f}" for v in strain_tared]
-                proc_file.write("\t".join(proc_row) + "\n")
-
                 t_data.append(t)
                 t_full.append(t)
                 for i in range(10):
@@ -389,8 +353,6 @@ def run_acquisition():
                 b2bot_full.append(disp_tared[6])
 
                 raw_file.flush()
-                proc_file.flush()
-                cal_file.flush()
 
                 # ── Refresh plots once per second (every SAMPLE_RATE loops) ──
                 plot_counter += 1
@@ -416,29 +378,21 @@ def run_acquisition():
             ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)  # restore normal power management
             print("\nAcquisition stopped.")
             raw_file.close()
-            proc_file.close()
-            cal_file.close()
 
             # ── Popup: ask whether to save data files ─────────────
             root = tk.Tk()
             root.withdraw()  # hide the root window
 
             save_data = messagebox.askyesno(
-                "Save Data Files",
-                "Do you want to save the data files?\n\n"
-                f"  • {raw_filename}\n"
-                f"  • {proc_filename}\n"
-                f"  • {cal_filename}"
+                "Save Data File",
+                "Do you want to save the data file?\n\n"
+                f"  • {raw_filename}"
             )
             if save_data:
                 print(f"Raw data saved to        {raw_filename}")
-                print(f"Processed data saved to  {proc_filename}")
-                print(f"Calibrated data saved to {cal_filename}")
             else:
                 os.remove(raw_filename)
-                os.remove(proc_filename)
-                os.remove(cal_filename)
-                print("Data files discarded.")
+                print("Data file discarded.")
 
             # ── Popup: ask whether to save plots ──────────────────
             save_plots = messagebox.askyesno(
