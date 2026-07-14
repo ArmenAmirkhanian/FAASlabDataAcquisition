@@ -122,13 +122,16 @@ def run_acquisition():
             )
 
         # -- Set sample rates (both tasks share the Armen chassis 100 MHz timebase) --
-        # CONTINUOUS mode: samps_per_chan is just the circular buffer size (~8.6 hr of
-        # slack here), not a hard sample ceiling — acquisition no longer stops on its own
-        # after a fixed count, however long the test runs.
+        # CONTINUOUS mode: samps_per_chan is just the circular buffer size — it only
+        # needs to absorb a transient stall (slow disk write, GC pause), NOT cover the
+        # whole test duration like a finite buffer would. 30 min of slack (~280 MB
+        # combined) is generous headroom without risking a large-allocation failure
+        # like the one from the old ~4.8 GB (31000 s) setting.
+        DAQ_BUFFER_SECONDS = 1800
         strain_task.timing.cfg_samp_clk_timing(
-            HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * 31000)
+            HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * DAQ_BUFFER_SECONDS)
         voltage_task.timing.cfg_samp_clk_timing(
-            HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * 31000)
+            HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * DAQ_BUFFER_SECONDS)
 
         # Fail loudly instead of silently dropping samples if the read loop ever
         # falls behind and the circular buffer fills.
