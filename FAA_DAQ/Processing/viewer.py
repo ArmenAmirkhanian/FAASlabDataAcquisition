@@ -38,7 +38,8 @@ if not in_path:
 root.destroy()
 
 # ── Load ──────────────────────────────────────────────────────────────────────
-df = pd.read_csv(in_path, sep="\t")
+#df = pd.read_csv(in_path, sep="\t"), for python txt files
+df = pd.read_csv(in_path, sep="\t", skiprows=list(range(6)) + [7])  # MTS: 6 metadata lines, header, units row
 
 if "time_s" in df.columns:
     time = df["time_s"].values
