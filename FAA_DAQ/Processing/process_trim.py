@@ -27,6 +27,223 @@ from tkinter import filedialog, messagebox
 # ── Configuration ─────────────────────────────────────────────────────────────
 SAMPLE_RATE  = 16
 RAMP_SECONDS = 5.0   # seconds of ramp data kept before cycle start
+MARKER_MS    = 3.5
+LINE_W       = 1.0
+
+# ── 24-colour palette (same as process_badcycles_fix.py) ──────────────────────
+_PALETTE = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+    "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5",
+    "#393b79", "#637939", "#8c6d31", "#843c39",
+]
+
+# ── Optional pre-trim drop-region selector ───────────────────────────────────
+def select_drop_markers(time_arr, data_arr, cols_list):
+    """
+    Optional step, run BEFORE cycle-start selection: mark a bad/garbage
+    region to delete outright, separately for the voltage module (DCDT +
+    Pressure) and the strain module — e.g. a startup glitch or known-bad
+    stretch that would otherwise throw off cycle-start detection.
+
+    Four markers, each independently armed/placed:
+      • Voltage drop start / end (orange --)
+      • Strain  drop start / end (purple --)
+    "Skip step" bypasses this entirely (nothing removed).
+    "Apply ->" proceeds with whichever pair(s) were placed; a module with
+    no (start, end) pair placed is left untouched.
+
+    Returns (v_drop_start, v_drop_end, s_drop_start, s_drop_end) — any/all
+    may be None (None, None, None, None) if skipped or not placed.
+    """
+    WINDOW_S = 35.0
+
+    colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(cols_list))]
+    vis    = [c.startswith("DCDT_") for c in cols_list]
+    if not any(vis):
+        vis[0] = True
+
+    MODE_INFO = {
+        "v_start": ("Voltage\ndrop start", "#cc6600", "#ffd090"),
+        "v_end":   ("Voltage\ndrop end",   "#cc6600", "#ffd090"),
+        "s_start": ("Strain\ndrop start",  "#7700cc", "#e0b0ff"),
+        "s_end":   ("Strain\ndrop end",    "#7700cc", "#e0b0ff"),
+    }
+    marks        = {k: [None] for k in MODE_INFO}
+    mode         = [None]
+    result       = {"skipped": False}
+    leg_line_map = {}
+
+    fig = plt.figure(figsize=(17, 9))
+    fig.suptitle(
+        "OPTIONAL — mark a bad/garbage region to delete before trimming, separately for "
+        "voltage and strain\n"
+        "Click a marker button to arm it -> click on plot to place  |  "
+        "'Skip step' bypasses this entirely  •  'Apply ->' when done\n"
+        "Scroll to navigate  •  Click legend to toggle channel",
+        fontsize=8.5, fontweight="bold"
+    )
+
+    plot_ax  = fig.add_axes([0.08, 0.13, 0.90, 0.79])
+    slide_ax = fig.add_axes([0.08, 0.04, 0.90, 0.04])
+
+    bw, bh, bx = 0.065, 0.048, 0.005
+    btn_dcdt  = Button(fig.add_axes([bx, 0.85, bw, bh]), "DCDT",     color="#d0e8ff", hovercolor="#b0cfff")
+    btn_sg    = Button(fig.add_axes([bx, 0.80, bw, bh]), "Strain",   color="#ffd0d0", hovercolor="#ffb0b0")
+    btn_press = Button(fig.add_axes([bx, 0.75, bw, bh]), "Pressure", color="#ffe0b0", hovercolor="#ffc870")
+    btn_all   = Button(fig.add_axes([bx, 0.70, bw, bh]), "All on",   color="#d0ffd0", hovercolor="#b0ffb0")
+    btn_none  = Button(fig.add_axes([bx, 0.65, bw, bh]), "All off",  color="#e8e8e8", hovercolor="#d0d0d0")
+
+    mode_axes, mode_btns = {}, {}
+    y = 0.56
+    for key in ("v_start", "v_end", "s_start", "s_end"):
+        label, _armed_col, idle_col = MODE_INFO[key]
+        ax_  = fig.add_axes([bx, y, bw, bh])
+        btn_ = Button(ax_, label, color=idle_col, hovercolor=idle_col)
+        mode_axes[key] = ax_
+        mode_btns[key] = btn_
+        y -= 0.05
+
+    btn_skip  = Button(fig.add_axes([bx, y - 0.03, bw, bh]), "Skip\nstep", color="#e8e8e8", hovercolor="#d0d0d0")
+    btn_apply = Button(fig.add_axes([bx, y - 0.08, bw, bh]), "Apply ->",   color="#90ee90", hovercolor="#60dd60")
+
+    for btn in (btn_dcdt, btn_sg, btn_press, btn_all, btn_none, btn_skip, btn_apply,
+                *mode_btns.values()):
+        btn.label.set_fontsize(7)
+
+    t_max_sl = max(float(time_arr[-1]) - WINDOW_S, float(time_arr[0]) + 0.01)
+    slider   = Slider(slide_ax, "Time (s)", float(time_arr[0]), t_max_sl,
+                      valinit=float(time_arr[0]), color="steelblue")
+
+    def update_mode_buttons():
+        for key, ax_ in mode_axes.items():
+            _label, armed_col, idle_col = MODE_INFO[key]
+            armed = (mode[0] == key)
+            c = armed_col if armed else idle_col
+            mode_btns[key].color      = c
+            mode_btns[key].hovercolor = c
+            mode_btns[key].label.set_color("white" if armed else "black")
+            ax_.set_facecolor(c)
+        fig.canvas.draw_idle()
+
+    update_mode_buttons()
+
+    def redraw(_=None, keep_xlim=False):
+        saved_xlim = plot_ax.get_xlim() if keep_xlim else None
+        t_left  = slider.val
+        t_right = t_left + WINDOW_S
+        mask    = (time_arr >= t_left) & (time_arr <= t_right)
+        win_t   = time_arr[mask]
+
+        plot_ax.cla()
+        leg_line_map.clear()
+
+        plotted_channels = []
+        for i, c in enumerate(cols_list):
+            if vis[i]:
+                plot_ax.plot(win_t, data_arr[mask, i],
+                             lw=LINE_W, color=colors[i], label=c, alpha=0.85,
+                             marker="o", markersize=MARKER_MS)
+                plotted_channels.append(c)
+
+        for key, (label, col, _idle) in MODE_INFO.items():
+            t = marks[key][0]
+            if t is not None:
+                flat_label = label.replace("\n", " ")
+                plot_ax.axvline(t, color=col, lw=2.0, ls="--", zorder=10,
+                                label=f"{flat_label}: {t:.4f} s")
+
+        if mode[0] is not None:
+            active_col  = MODE_INFO[mode[0]][1]
+            flat_label  = MODE_INFO[mode[0]][0].replace("\n", " ").upper()
+            title_line1 = f"ARMED: {flat_label} — click on plot to place"
+        else:
+            active_col  = "gray"
+            title_line1 = "No marker armed — zoom/pan freely"
+        plot_ax.set_title(
+            f"{title_line1}\nClick a legend entry to toggle that channel",
+            fontsize=8.5, color=active_col
+        )
+
+        if keep_xlim and saved_xlim is not None:
+            plot_ax.set_xlim(saved_xlim)
+        else:
+            plot_ax.set_xlim(t_left, t_right)
+        plot_ax.set_xlabel("Time (s)", fontsize=9)
+        plot_ax.set_ylabel("Value", fontsize=9)
+        plot_ax.grid(True, alpha=0.3)
+
+        if plotted_channels or any(v[0] is not None for v in marks.values()):
+            leg = plot_ax.legend(fontsize=7, ncol=2, loc="upper right")
+            for leg_line, ch_name in zip(leg.get_lines(), plotted_channels):
+                leg_line.set_picker(8)
+                leg_line.set_linewidth(2.5)
+                leg_line_map[leg_line] = ch_name
+
+        fig.canvas.draw_idle()
+
+    def set_group(group):
+        for i, c in enumerate(cols_list):
+            if   group == "dcdt":  vis[i] = c.startswith("DCDT_")
+            elif group == "sg":    vis[i] = c.startswith("SG_")
+            elif group == "press": vis[i] = "pressure" in c.lower() or c.startswith("volt_ch")
+            elif group == "all":   vis[i] = True
+            elif group == "none":  vis[i] = False
+        redraw(keep_xlim=True)
+
+    def toggle_mode(m):
+        mode[0] = None if mode[0] == m else m
+        update_mode_buttons()
+        redraw(keep_xlim=True)
+
+    def on_legend_pick(event):
+        leg_line = event.artist
+        if leg_line not in leg_line_map:
+            return
+        idx = cols_list.index(leg_line_map[leg_line])
+        vis[idx] = not vis[idx]
+        redraw(keep_xlim=True)
+
+    def on_plot_click(event):
+        if mode[0] is None:
+            return
+        if event.inaxes is not plot_ax or event.button != 1 or event.xdata is None:
+            return
+        leg = plot_ax.get_legend()
+        if leg is not None and leg.get_window_extent().contains(event.x, event.y):
+            return
+        snapped = float(time_arr[int(np.argmin(np.abs(time_arr - event.xdata)))])
+        marks[mode[0]][0] = snapped
+        redraw(keep_xlim=True)
+
+    def do_skip(_):
+        result["skipped"] = True
+        plt.close(fig)
+
+    def do_apply(_):
+        plt.close(fig)
+
+    slider.on_changed(redraw)
+    btn_dcdt.on_clicked(lambda _:  set_group("dcdt"))
+    btn_sg.on_clicked(lambda _:    set_group("sg"))
+    btn_press.on_clicked(lambda _: set_group("press"))
+    btn_all.on_clicked(lambda _:   set_group("all"))
+    btn_none.on_clicked(lambda _:  set_group("none"))
+    for key in mode_btns:
+        mode_btns[key].on_clicked(lambda _, k=key: toggle_mode(k))
+    btn_skip.on_clicked(do_skip)
+    btn_apply.on_clicked(do_apply)
+    fig.canvas.mpl_connect("pick_event",         on_legend_pick)
+    fig.canvas.mpl_connect("button_press_event", on_plot_click)
+
+    redraw()
+    plt.show()
+
+    if result["skipped"]:
+        return None, None, None, None
+    return marks["v_start"][0], marks["v_end"][0], marks["s_start"][0], marks["s_end"][0]
+
 
 # ── Interactive cycle-start selector ─────────────────────────────────────────
 def select_time_markers(time_arr, data_arr, cols_list):
@@ -39,13 +256,7 @@ def select_time_markers(time_arr, data_arr, cols_list):
     """
     WINDOW_S = 35.0
 
-    def ch_color(c):
-        if c.startswith("DCDT_"):                               return "steelblue"
-        if c.startswith("SG_"):                                 return "tomato"
-        if "pressure" in c.lower() or c.startswith("volt_ch"): return "darkorange"
-        return "gray"
-
-    colors = [ch_color(c) for c in cols_list]
+    colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(cols_list))]
     vis    = [c.startswith("DCDT_") for c in cols_list]
     if not any(vis):
         vis[0] = True
@@ -126,7 +337,8 @@ def select_time_markers(time_arr, data_arr, cols_list):
         for i, c in enumerate(cols_list):
             if vis[i]:
                 plot_ax.plot(win_t, data_arr[mask, i],
-                             lw=0.9, color=colors[i], label=c, alpha=0.85)
+                             lw=LINE_W, color=colors[i], label=c, alpha=0.85,
+                             marker="o", markersize=MARKER_MS)
                 plotted_channels.append(c)
 
         if t_cs_voltage[0] is not None:
@@ -280,6 +492,66 @@ strain_cols  = [c for c in all_cols if c.startswith("SG_")]
 
 print(f"\n  Voltage module columns ({len(voltage_cols)}): DCDT + Pressure/Voltage")
 print(f"  Strain module columns  ({len(strain_cols)}):  Strain gauges")
+
+# ── Optional: mark & delete a bad/garbage region before trimming ─────────────
+# Voltage and strain are deleted independently (own start/end pair each), then
+# reconciled to the shorter of the two resulting lengths — same "take the
+# shorter" reconciliation the alignment step below already uses. The
+# resulting dataframe becomes the input to everything from here on, exactly
+# as if it had been the originally loaded file.
+print("\n  Opening optional pre-trim 'drop region' plot.")
+print("  Mark a bad/garbage stretch to delete — separately for voltage and")
+print("  strain if needed — or click 'Skip step' to bypass this entirely.\n")
+
+full_data_for_drop = df[all_cols].values.astype(float)
+v_drop_s, v_drop_e, s_drop_s, s_drop_e = select_drop_markers(time, full_data_for_drop, all_cols)
+del full_data_for_drop
+
+v_pair_ok = v_drop_s is not None and v_drop_e is not None and v_drop_e > v_drop_s
+s_pair_ok = s_drop_s is not None and s_drop_e is not None and s_drop_e > s_drop_s
+
+if not v_pair_ok and not s_pair_ok:
+    print("  No drop region applied (skipped, or no valid start/end pair placed).")
+else:
+    keep_v = np.ones(n_rows, dtype=bool)
+    keep_s = np.ones(n_rows, dtype=bool)
+
+    if v_pair_ok:
+        row_v_s = int(np.argmin(np.abs(time - v_drop_s)))
+        row_v_e = int(np.argmin(np.abs(time - v_drop_e)))
+        keep_v[row_v_s:row_v_e] = False
+        print(f"  Voltage drop : rows {row_v_s:,} → {row_v_e - 1:,}  "
+              f"({row_v_e - row_v_s:,} rows, {(v_drop_e - v_drop_s):.3f} s) removed")
+    if s_pair_ok:
+        row_s_s = int(np.argmin(np.abs(time - s_drop_s)))
+        row_s_e = int(np.argmin(np.abs(time - s_drop_e)))
+        keep_s[row_s_s:row_s_e] = False
+        print(f"  Strain  drop : rows {row_s_s:,} → {row_s_e - 1:,}  "
+              f"({row_s_e - row_s_s:,} rows, {(s_drop_e - s_drop_s):.3f} s) removed")
+
+    v_arr = df[voltage_cols].values[keep_v]
+    s_arr = df[strain_cols].values[keep_s]
+    n2    = min(len(v_arr), len(s_arr))
+    v_arr = v_arr[:n2]
+    s_arr = s_arr[:n2]
+
+    new_time2 = np.arange(n2) / SAMPLE_RATE
+    out_data2 = {"time_s": new_time2}
+    for c in all_cols:
+        if c in voltage_cols:
+            out_data2[c] = v_arr[:, voltage_cols.index(c)]
+        elif c in strain_cols:
+            out_data2[c] = s_arr[:, strain_cols.index(c)]
+
+    df   = pd.DataFrame(out_data2)   # becomes the input to the trim step below
+    time = df["time_s"].values
+    t_start  = time[0]
+    t_end    = time[-1]
+    duration = t_end - t_start
+    n_rows   = len(df)
+    dt       = np.median(np.diff(time))
+    print(f"  Working data after drop removal: {n_rows:,} rows "
+          f"({duration:.2f} s) — this is now the input to the trim step below.")
 
 # ── Interactive marker selection ──────────────────────────────────────────────
 print("\n  Opening interactive plot.")

@@ -21,8 +21,9 @@ VOLTAGE_MODULE  = "cDAQ2Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE_A = "cDAQ2Mod2"  # Slot 2: NI-9235 (strain ai0–ai7, 8 channels)
 STRAIN_MODULE_B = "cDAQ2Mod3"  # Slot 3: NI-9235 (strain ai0–ai1, 2 channels)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
-HW_RATE          = 794        # Hardware clock rate for both tasks (NI-9235 minimum)
-DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 794/16 ≈ 50 — samples averaged per output sample
+HW_RATE          = 800        # Hardware clock rate (NI-9235 min is 794; 800 is the next
+                               # multiple of 16 above that floor, so DOWNSAMPLE divides evenly)
+DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 800/16 = 50 exactly — samples averaged per output sample
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 RECORD_SECONDS   = 30000       # Steady-state recording duration (10 hour) before ramp-down
@@ -132,6 +133,17 @@ def run_acquisition():
             HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * DAQ_BUFFER_SECONDS)
         voltage_task.timing.cfg_samp_clk_timing(
             HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * DAQ_BUFFER_SECONDS)
+
+        # Confirm the hardware actually locked in the requested rate rather than
+        # silently coercing it to its nearest supported value — if it didn't, the
+        # 16 Hz output rate would be off again.
+        actual_strain_rate  = strain_task.timing.samp_clk_rate
+        actual_voltage_rate = voltage_task.timing.samp_clk_rate
+        print(f"Strain task clock rate:  {actual_strain_rate} Hz (requested {HW_RATE} Hz)")
+        print(f"Voltage task clock rate: {actual_voltage_rate} Hz (requested {HW_RATE} Hz)")
+        if abs(actual_strain_rate - HW_RATE) > 0.01 or abs(actual_voltage_rate - HW_RATE) > 0.01:
+            print("WARNING: hardware did not accept the requested rate exactly — "
+                  "output will not be exactly 16 Hz.")
 
         # Fail loudly instead of silently dropping samples if the read loop ever
         # falls behind and the circular buffer fills.
