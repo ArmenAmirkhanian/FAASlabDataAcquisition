@@ -21,9 +21,19 @@ VOLTAGE_MODULE  = "cDAQ2Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE_A = "cDAQ2Mod2"  # Slot 2: NI-9235 (strain ai0–ai7, 8 channels)
 STRAIN_MODULE_B = "cDAQ2Mod3"  # Slot 3: NI-9235 (strain ai0–ai1, 2 channels)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
-HW_RATE          = 800        # Hardware clock rate (NI-9235 min is 794; 800 is the next
-                               # multiple of 16 above that floor, so DOWNSAMPLE divides evenly)
-DOWNSAMPLE       = round(HW_RATE / SAMPLE_RATE)  # 800/16 = 50 exactly — samples averaged per output sample
+HW_RATE          = 800         # Requested clock rate for both tasks. Real hardware testing
+                               # confirmed the two tasks do NOT necessarily share a true
+                               # clock at a given request (e.g. voltage_task/NI-9205 has
+                               # landed on exactly the requested rate, while strain_task/
+                               # NI-9235 has landed elsewhere, such as 806.4516129032258 Hz
+                               # for an 800 Hz request). Rather than hardcode either task's
+                               # expected rate, both tasks read back their own ACTUAL locked
+                               # rate at startup (below) and downsample independently from
+                               # that live value — see the per-task running-target
+                               # accumulator in the main loop. This adapts automatically if
+                               # the achievable rate ever changes (different channel count,
+                               # different hardware); nothing here is hardcoded to today's
+                               # measured values.
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
 RECORD_SECONDS   = 30000       # Steady-state recording duration (10 hour) before ramp-down
@@ -134,16 +144,23 @@ def run_acquisition():
         voltage_task.timing.cfg_samp_clk_timing(
             HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * DAQ_BUFFER_SECONDS)
 
-        # Confirm the hardware actually locked in the requested rate rather than
-        # silently coercing it to its nearest supported value — if it didn't, the
-        # 16 Hz output rate would be off again.
+        # Read back each task's ACTUAL locked-in rate — hardware may coerce the
+        # requested rate to its nearest achievable value (confirmed: strain and
+        # voltage tasks can land on different actual clocks for the same request).
+        # The main loop's per-task accumulator targets these live values directly,
+        # so downsampling is always correct even if the achievable rate changes.
         actual_strain_rate  = strain_task.timing.samp_clk_rate
         actual_voltage_rate = voltage_task.timing.samp_clk_rate
         print(f"Strain task clock rate:  {actual_strain_rate} Hz (requested {HW_RATE} Hz)")
         print(f"Voltage task clock rate: {actual_voltage_rate} Hz (requested {HW_RATE} Hz)")
-        if abs(actual_strain_rate - HW_RATE) > 0.01 or abs(actual_voltage_rate - HW_RATE) > 0.01:
-            print("WARNING: hardware did not accept the requested rate exactly — "
-                  "output will not be exactly 16 Hz.")
+        # Wide tolerance — routine ODR quantization can land tens of Hz from the
+        # request, that's expected and handled. This only flags a genuinely broken
+        # configuration (wrong device, wrong channel count, etc.).
+        RATE_SANITY_TOLERANCE = 0.10  # 10%
+        if (abs(actual_strain_rate - HW_RATE) > HW_RATE * RATE_SANITY_TOLERANCE or
+                abs(actual_voltage_rate - HW_RATE) > HW_RATE * RATE_SANITY_TOLERANCE):
+            print("WARNING: an actual clock rate is far from the requested rate — "
+                  "check the task/channel configuration before proceeding.")
 
         # Fail loudly instead of silently dropping samples if the read loop ever
         # falls behind and the circular buffer fills.
@@ -164,6 +181,17 @@ def run_acquisition():
 
         # Sample counter for drift-free timestamps starting at t=0
         output_sample_count = 0
+
+        # Running-target sample accumulators, one per task, driven by each task's
+        # own live-measured samp_clk_rate (not a hardcoded ratio). Each iteration,
+        # the target grows by rate/SAMPLE_RATE; the read size is "how many samples
+        # should have been taken by now" minus "how many have been taken so far" —
+        # this stays exactly on the true long-run average with no cumulative drift,
+        # and adapts automatically to whatever rate the hardware actually reports.
+        strain_target_cum   = 0.0
+        strain_taken         = 0
+        voltage_target_cum   = 0.0
+        voltage_taken         = 0
 
         # Ramp tare accumulators
         ramp_strain    = [0.0] * 10
@@ -268,30 +296,42 @@ def run_acquisition():
         plt.tight_layout()
         plt.show(block=False)
 
-        # All three modules share the cDAQ-9173 chassis 100 MHz backplane timebase
-        # so their sample clocks cannot drift. Starting back-to-back gives <1 ms offset.
+        # NOTE: real hardware testing confirmed the strain and voltage tasks do NOT
+        # necessarily share a true clock rate even when requesting the same HW_RATE
+        # (see the samp_clk_rate readback above) — do not assume synchronized clocks
+        # here. Each task is downsampled independently in the main loop below using
+        # its own live-measured rate.
         strain_task.start()
         voltage_task.start()
 
         try:
             while True:
-                # Read voltage channels (16 Hz) and strain channels (974 Hz, then average)
-                # STRAIN_DOWNSAMPLE strain samples are collected per voltage sample
-                # and averaged to produce one strain value at the effective 16 Hz rate
+                # Each task's read size = "total samples it should have produced by
+                # now, at its own live-measured rate" minus "how many it's already
+                # produced" — stays exactly on the true long-run average with no
+                # cumulative drift, independently for each task's own actual clock.
+                strain_target_cum  += actual_strain_rate / SAMPLE_RATE
+                n_strain = round(strain_target_cum) - strain_taken
+                strain_taken += n_strain
+
+                voltage_target_cum += actual_voltage_rate / SAMPLE_RATE
+                n_voltage = round(voltage_target_cum) - voltage_taken
+                voltage_taken += n_voltage
+
+                # Read strain and voltage channels, each at its own live-measured rate
                 strain_data  = strain_task.read(
-                    number_of_samples_per_channel=DOWNSAMPLE)
+                    number_of_samples_per_channel=n_strain)
                 voltage_data = voltage_task.read(
-                    number_of_samples_per_channel=DOWNSAMPLE)
+                    number_of_samples_per_channel=n_voltage)
 
-
-                # Both tasks read DOWNSAMPLE=61 samples per loop at 974 Hz (shared clock)
-                # Average all 61 → 1 output value per channel at effective 16 Hz
-                strain_raw = [sum(strain_data[i])  / DOWNSAMPLE for i in range(10)]
-                disp_raw   = [sum(voltage_data[i]) / DOWNSAMPLE for i in range(12)]
-                v17 = sum(voltage_data[12]) / DOWNSAMPLE
-                v18 = sum(voltage_data[13]) / DOWNSAMPLE
-                v19 = sum(voltage_data[14]) / DOWNSAMPLE
-                v20 = sum(voltage_data[15]) / DOWNSAMPLE
+                # Average each task's own sample count → 1 output value per channel at
+                # effective 16 Hz
+                strain_raw = [sum(strain_data[i])  / n_strain for i in range(10)]
+                disp_raw   = [sum(voltage_data[i]) / n_voltage for i in range(12)]
+                v17 = sum(voltage_data[12]) / n_voltage
+                v18 = sum(voltage_data[13]) / n_voltage
+                v19 = sum(voltage_data[14]) / n_voltage
+                v20 = sum(voltage_data[15]) / n_voltage
 
                 # ── Step 2: Convert raw to physical units ─────────
                 disp_in   = [disp_raw[i] * DISP_SCALE[i] for i in range(12)]
