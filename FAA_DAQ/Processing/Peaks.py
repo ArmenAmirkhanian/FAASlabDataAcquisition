@@ -175,19 +175,29 @@ def main():
                          "the upper/lower files (exact pick time per channel)")
     args = ap.parse_args()
 
+    last_dir_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  ".last_dir.txt")
+
     in_path = args.input
     if in_path is None:
         import tkinter as tk
         from tkinter import filedialog
+        start_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.isfile(last_dir_file):
+            saved = open(last_dir_file).read().strip()
+            if os.path.isdir(saved):
+                start_dir = saved
         root = tk.Tk()
         root.withdraw()
         in_path = filedialog.askopenfilename(
             title="Select cyclic-loading data file",
-            initialdir=os.path.dirname(os.path.abspath(__file__)),
+            initialdir=start_dir,
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
         root.destroy()
         if not in_path:
             sys.exit("No file selected.")
+        with open(last_dir_file, "w") as fh:
+            fh.write(os.path.dirname(os.path.abspath(in_path)))
 
     df = pd.read_csv(in_path, sep="\t")
     if "time_s" not in df.columns:

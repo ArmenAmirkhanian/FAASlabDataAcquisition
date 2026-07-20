@@ -32,8 +32,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 SAMPLE_RATE = 16  # Hz — only used to regenerate a continuous time_s column after merging
+CYCLE_HZ    = 1.0  # nominal cyclic-loading frequency, Hz
 MARKER_MS   = 3.5
 LINE_W      = 1.0
+# samples averaged at each boundary when matching continuity — several full cycles
+# (median, not mean) so a single noisy/partial cycle at the trim boundary can't
+# skew the estimate and bake a permanent offset error into the rest of the segment
+MATCH_CYCLES  = 10
+MATCH_SAMPLES = int(round(SAMPLE_RATE / CYCLE_HZ)) * MATCH_CYCLES
+OFFSET_FLAG_THRESHOLD = 0.01  # print per-column detail if |offset| exceeds this
 
 # 24-colour palette (same as process_badcycles_fix.py / postprocess_peaks.py)
 _PALETTE = [
@@ -95,8 +102,8 @@ def pick_trim_ranges(df, filename):
         fontsize=8.5, fontweight="bold"
     )
 
-    plot_ax  = fig.add_axes([0.08, 0.13, 0.90, 0.79])
-    slide_ax = fig.add_axes([0.08, 0.04, 0.90, 0.04])
+    plot_ax  = fig.add_axes([0.14, 0.13, 0.84, 0.79])
+    slide_ax = fig.add_axes([0.14, 0.04, 0.84, 0.04])
 
     bw, bh, bx = 0.065, 0.048, 0.005
     btn_dcdt  = Button(fig.add_axes([bx, 0.85, bw, bh]), "DCDT",     color="#d0e8ff", hovercolor="#b0cfff")
@@ -147,13 +154,15 @@ def pick_trim_ranges(df, filename):
         plot_ax.cla()
         leg_line_map.clear()
 
-        plotted_channels = []
+        # always plot every channel (so it always has a legend entry to click back
+        # on) — toggled-off channels are just made invisible, not omitted
         for i, c in enumerate(data_cols):
-            if vis[i]:
-                plot_ax.plot(win_t, data_arr[mask, i],
-                             lw=LINE_W, color=colors[i], label=c, alpha=0.85,
-                             marker="o", markersize=MARKER_MS)
-                plotted_channels.append(c)
+            line, = plot_ax.plot(win_t, data_arr[mask, i],
+                                 lw=LINE_W, color=colors[i], label=c, alpha=0.85,
+                                 marker="o", markersize=MARKER_MS)
+            line.set_visible(vis[i])
+        plot_ax.relim(visible_only=True)
+        plot_ax.autoscale_view()
 
         for key, (label, col, _idle) in MODE_INFO.items():
             t = marks[key][0]
@@ -183,12 +192,12 @@ def pick_trim_ranges(df, filename):
         plot_ax.set_ylabel("Value", fontsize=9)
         plot_ax.grid(True, alpha=0.3)
 
-        if plotted_channels or any(v[0] is not None for v in marks.values()):
-            leg = plot_ax.legend(fontsize=7, ncol=2, loc="upper right")
-            for leg_line, ch_name in zip(leg.get_lines(), plotted_channels):
-                leg_line.set_picker(8)
-                leg_line.set_linewidth(2.5)
-                leg_line_map[leg_line] = ch_name
+        leg = plot_ax.legend(fontsize=7, ncol=2, loc="upper right")
+        for leg_line, ch_name in zip(leg.get_lines(), data_cols):
+            leg_line.set_picker(8)
+            leg_line.set_linewidth(2.5)
+            leg_line.set_alpha(1.0 if vis[data_cols.index(ch_name)] else 0.25)
+            leg_line_map[leg_line] = ch_name
 
         fig.canvas.draw_idle()
 
@@ -287,6 +296,34 @@ def main():
     v_chunks, s_chunks = [], []
     voltage_cols = strain_cols = None
     had_time_col = False
+    last_v_vals = last_s_vals = None   # per-column boundary value from the previous chunk
+
+    def match_continuity(chunk, last_vals, label):
+        """Shift each column by a constant so its start matches where the
+        previous chunk's same column left off (median of MATCH_SAMPLES —
+        several cycles — at each end, robust to a noisy/partial cycle right
+        at the trim boundary) — removes the between-file baseline jump/drift."""
+        if last_vals is None or chunk.empty:
+            new_last = ({c: chunk[c].iloc[-MATCH_SAMPLES:].median() for c in chunk.columns}
+                        if not chunk.empty else last_vals)
+            return chunk, new_last
+        n = min(MATCH_SAMPLES, len(chunk))
+        shifted = chunk.copy()
+        offsets = {}
+        for c in chunk.columns:
+            offset = last_vals[c] - chunk[c].iloc[:n].median()
+            shifted[c] = chunk[c] + offset
+            offsets[c] = offset
+        if offsets:
+            vals = list(offsets.values())
+            print(f"  {label} continuity offsets: {min(vals):+.5f} to {max(vals):+.5f}")
+            big = {c: o for c, o in offsets.items() if abs(o) > OFFSET_FLAG_THRESHOLD}
+            if big:
+                detail = ", ".join(f"{c}={o:+.4f}" for c, o in
+                                    sorted(big.items(), key=lambda kv: -abs(kv[1])))
+                print(f"    >{OFFSET_FLAG_THRESHOLD:g} on: {detail}")
+        new_last = {c: shifted[c].iloc[-MATCH_SAMPLES:].median() for c in shifted.columns}
+        return shifted, new_last
 
     for p in in_paths:
         df = pd.read_csv(p, sep="\t")
@@ -306,6 +343,10 @@ def main():
         s_chunk = df[strain_cols].iloc[s0:s1 + 1].reset_index(drop=True)
         print(f"  Voltage rows {v0}-{v1}  ({len(v_chunk)} rows)   "
               f"Strain rows {s0}-{s1}  ({len(s_chunk)} rows)")
+
+        v_chunk, last_v_vals = match_continuity(v_chunk, last_v_vals, "Voltage")
+        s_chunk, last_s_vals = match_continuity(s_chunk, last_s_vals, "Strain")
+
         v_chunks.append(v_chunk)
         s_chunks.append(s_chunk)
 

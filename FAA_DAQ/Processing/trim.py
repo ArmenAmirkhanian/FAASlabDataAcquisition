@@ -85,8 +85,8 @@ def select_drop_markers(time_arr, data_arr, cols_list):
         fontsize=8.5, fontweight="bold"
     )
 
-    plot_ax  = fig.add_axes([0.08, 0.13, 0.90, 0.79])
-    slide_ax = fig.add_axes([0.08, 0.04, 0.90, 0.04])
+    plot_ax  = fig.add_axes([0.12, 0.13, 0.85, 0.79])
+    slide_ax = fig.add_axes([0.12, 0.04, 0.85, 0.04])
 
     bw, bh, bx = 0.065, 0.048, 0.005
     btn_dcdt  = Button(fig.add_axes([bx, 0.85, bw, bh]), "DCDT",     color="#d0e8ff", hovercolor="#b0cfff")
@@ -275,8 +275,8 @@ def select_time_markers(time_arr, data_arr, cols_list):
         fontsize=8.5, fontweight="bold"
     )
 
-    plot_ax  = fig.add_axes([0.08, 0.13, 0.90, 0.79])
-    slide_ax = fig.add_axes([0.08, 0.04, 0.90, 0.04])
+    plot_ax  = fig.add_axes([0.12, 0.13, 0.85, 0.79])
+    slide_ax = fig.add_axes([0.12, 0.04, 0.85, 0.04])
 
     bw, bh, bx = 0.065, 0.048, 0.005
 

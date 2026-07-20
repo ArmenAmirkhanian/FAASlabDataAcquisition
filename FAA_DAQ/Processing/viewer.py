@@ -38,8 +38,8 @@ if not in_path:
 root.destroy()
 
 # ── Load ──────────────────────────────────────────────────────────────────────
-#df = pd.read_csv(in_path, sep="\t"), for python txt files
-df = pd.read_csv(in_path, sep="\t", skiprows=list(range(6)) + [7])  # MTS: 6 metadata lines, header, units row
+df = pd.read_csv(in_path, sep="\t")  # for python txt files
+#df = pd.read_csv(in_path, sep="\t", skiprows=list(range(6)) + [7])  # MTS: 6 metadata lines, header, units row
 
 if "time_s" in df.columns:
     time = df["time_s"].values
@@ -80,8 +80,8 @@ fig.suptitle(
     fontsize=8.5, fontweight="bold"
 )
 
-plot_ax  = fig.add_axes([0.08, 0.13, 0.90, 0.79])
-slide_ax = fig.add_axes([0.08, 0.04, 0.90, 0.04])
+plot_ax  = fig.add_axes([0.12, 0.13, 0.85, 0.79])
+slide_ax = fig.add_axes([0.12, 0.04, 0.85, 0.04])
 
 bw, bh, bx = 0.065, 0.048, 0.005
 btn_dcdt  = Button(fig.add_axes([bx, 0.80, bw, bh]), "DCDT",     color="#d0e8ff", hovercolor="#b0cfff")

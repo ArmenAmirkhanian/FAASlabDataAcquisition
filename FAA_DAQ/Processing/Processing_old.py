@@ -24,6 +24,7 @@ DISP_SCALE = [
     3.937 / 10.0,   # DCDT_Right_Slab_B1
     1.969 / 10.0,   # DCDT_Right_Slab_B3
     3.937 / 10.0,   # DCDT_Left_Slab_B1
+    3.937 / 10.0,   # DCDT_Left_Slab_B2_Bot
     1.969 / 10.0,   # DCDT_Left_Slab_B3
     3.937 / 10.0,   # DCDT_Left_Slab_C1
     3.937 / 10.0,   # DCDT_Left_Slab_C2
@@ -58,7 +59,7 @@ strain_names = [
 disp_names = [
     "DCDT_Right_Slab_A1", "DCDT_Right_Slab_A2", "DCDT_Right_Slab_A3",
     "DCDT_Right_Slab_B1", "DCDT_Right_Slab_B3",
-    "DCDT_Left_Slab_B1",  "DCDT_Left_Slab_B3",
+    "DCDT_Left_Slab_B1",  "DCDT_Left_Slab_B2_Bot", "DCDT_Left_Slab_B3",
     "DCDT_Left_Slab_C1",  "DCDT_Left_Slab_C2", "DCDT_Left_Slab_C3",
     "DCDT_Beam_B2_Top"
 ]
