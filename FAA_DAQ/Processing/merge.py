@@ -3,11 +3,14 @@ postprocess_merge.py — Simple multi-file merger with interactive trim selectio
 
 For each selected file (any filename):
   1. Load it as-is — no unit conversion, no taring.
-  2. Show an interactive plot of all its columns. Arm "Voltage Start/End" or
-     "Strain Start/End" and click on the plot to place each marker, then
-     click "Confirm". Voltage (DCDT_/pressure/volt_ch) and strain (SG_) are
+  2. Skip the first RAMP_SECONDS of every file automatically (pre-load /
+     ramp) — this is the start of both the voltage and strain ranges, no
+     marker needed.
+  3. Show an interactive plot of all its columns. Arm "Voltage End" or
+     "Strain End" and click on the plot to place each marker, then click
+     "Confirm". Voltage (DCDT_/pressure/volt_ch) and strain (SG_) are
      trimmed INDEPENDENTLY, since strain cycles can lag voltage cycles.
-  3. Crop each group to its own marked range.
+  4. Crop each group from the end of its ramp to its own marked end.
 
 Across files, the voltage-group rows are concatenated end-to-end in
 selection order, and the strain-group rows are concatenated end-to-end
@@ -31,10 +34,11 @@ from matplotlib.widgets import Slider, Button
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-SAMPLE_RATE = 16  # Hz — only used to regenerate a continuous time_s column after merging
-CYCLE_HZ    = 1.0  # nominal cyclic-loading frequency, Hz
-MARKER_MS   = 3.5
-LINE_W      = 1.0
+SAMPLE_RATE  = 16   # Hz — only used to regenerate a continuous time_s column after merging
+CYCLE_HZ     = 1.0  # nominal cyclic-loading frequency, Hz
+RAMP_SECONDS = 5.0   # skip this much at the start of every file (pre-load / ramp)
+MARKER_MS    = 3.5
+LINE_W       = 1.0
 # samples averaged at each boundary when matching continuity — several full cycles
 # (median, not mean) so a single noisy/partial cycle at the trim boundary can't
 # skew the estimate and bake a permanent offset error into the rest of the segment
@@ -61,10 +65,12 @@ def is_strain_col(c):
 
 
 def pick_trim_ranges(df, filename):
-    """Interactive marker placement: arm Voltage/Strain Start/End independently,
-    click on the plot to place each one, then Confirm. Same interaction style
-    as process_trim.py's drop-region selector, but used here to trim the two
-    groups to separate ranges (voltage and strain cycles can be out of phase).
+    """Interactive marker placement: arm Voltage End or Strain End
+    independently, click on the plot to place each one, then Confirm. Same
+    interaction style as process_trim.py's drop-region selector, but used
+    here to trim the two groups to separate ranges (voltage and strain
+    cycles can be out of phase). The start of both ranges is fixed at
+    RAMP_SECONDS into the file — no marker needed.
 
     Returns (v_start_idx, v_end_idx, s_start_idx, s_end_idx).
     """
@@ -77,15 +83,16 @@ def pick_trim_ranges(df, filename):
     data_cols = [c for c in df.columns if c != "time_s"]
     data_arr = df[data_cols].to_numpy(float)
 
+    ramp_rows = int(round(RAMP_SECONDS * SAMPLE_RATE))
+    ramp_end_t = float(time_arr[min(ramp_rows, len(time_arr) - 1)])
+
     colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(data_cols))]
     vis = [c.startswith("DCDT_") for c in data_cols]
     if not any(vis):
         vis[0] = True
 
     MODE_INFO = {
-        "v_start": ("Voltage\nStart", "#cc6600", "#ffd090"),
         "v_end":   ("Voltage\nEnd",   "#cc6600", "#ffd090"),
-        "s_start": ("Strain\nStart",  "#7700cc", "#e0b0ff"),
         "s_end":   ("Strain\nEnd",    "#7700cc", "#e0b0ff"),
     }
     marks        = {k: [None] for k in MODE_INFO}
@@ -95,6 +102,7 @@ def pick_trim_ranges(df, filename):
     fig = plt.figure(figsize=(17, 9))
     fig.suptitle(
         f"{filename}\n"
+        f"First {RAMP_SECONDS:g}s (ramp) auto-excluded from both groups — dotted grey line  |  "
         "Click a marker button to arm it -> click on plot to place  |  "
         "Click armed button again to disarm (zoom/pan freely)\n"
         "Voltage and Strain are trimmed independently  •  Scroll to navigate  •  "
@@ -114,7 +122,7 @@ def pick_trim_ranges(df, filename):
 
     mode_axes, mode_btns = {}, {}
     y = 0.56
-    for key in ("v_start", "v_end", "s_start", "s_end"):
+    for key in ("v_end", "s_end"):
         label, _armed_col, idle_col = MODE_INFO[key]
         ax_  = fig.add_axes([bx, y, bw, bh])
         btn_ = Button(ax_, label, color=idle_col, hovercolor=idle_col)
@@ -164,12 +172,15 @@ def pick_trim_ranges(df, filename):
         plot_ax.relim(visible_only=True)
         plot_ax.autoscale_view()
 
+        if t_left <= ramp_end_t <= t_right:
+            plot_ax.axvline(ramp_end_t, color="gray", lw=1.5, ls=":", zorder=9,
+                            label=f"Ramp end (auto): {ramp_end_t:.4f} s")
+
         for key, (label, col, _idle) in MODE_INFO.items():
             t = marks[key][0]
             if t is not None:
                 flat_label = label.replace("\n", " ")
-                ls = "--" if key.endswith("start") else "-"
-                plot_ax.axvline(t, color=col, lw=2.0, ls=ls, zorder=10,
+                plot_ax.axvline(t, color=col, lw=2.0, ls="-", zorder=10,
                                 label=f"{flat_label}: {t:.4f} s")
 
         if mode[0] is not None:
@@ -258,9 +269,8 @@ def pick_trim_ranges(df, filename):
             return default
         return int(np.argmin(np.abs(time_arr - t)))
 
-    v0 = to_idx(marks["v_start"][0], 0)
+    v0 = s0 = min(ramp_rows, len(df) - 1)
     v1 = to_idx(marks["v_end"][0], len(df) - 1)
-    s0 = to_idx(marks["s_start"][0], 0)
     s1 = to_idx(marks["s_end"][0], len(df) - 1)
     if v0 > v1:
         v0, v1 = v1, v0

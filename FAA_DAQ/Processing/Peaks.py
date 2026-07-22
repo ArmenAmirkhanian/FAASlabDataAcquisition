@@ -48,10 +48,10 @@ def win_long_path(path):
     return path
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-SAMPLE_RATE  = 16          # Hz
+SAMPLE_RATE  = 15.88          # Hz
 CYCLE_HZ     = 1.0         # nominal loading frequency, Hz
 SPC          = int(round(SAMPLE_RATE / CYCLE_HZ))   # samples per cycle = 16
-RAMP_SECONDS = 5.0         # skip this much at the start (pre-load / ramp)
+RAMP_SECONDS = 0.0         # skip this much at the start (pre-load / ramp)
 MAX_LAG      = SPC // 2    # max per-channel phase offset searched (+/- rows)
 REF_PREFER   = "DCDT_Beam_B2_Top"   # preferred reference channel
 REF_PREFIX   = "DCDT_"              # fallback: mean of these channels

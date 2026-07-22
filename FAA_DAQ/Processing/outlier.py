@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
 """
-clean_peaks.py — Remove big jumps and outlier cycles from Peaks.py's output
-files (<name>_upper_peaks.txt, _lower_peaks.txt, _peak_diff.txt), per channel.
+clean_peaks.py — Remove outlier cycles from Peaks.py's output files
+(<name>_upper_peaks.txt, _lower_peaks.txt, _peak_diff.txt), per channel.
 
-Two kinds of defects are handled independently, per channel:
-  1. OUTLIER / SPIKE  — a single (or few) cycle whose peak value is way off
-     from its neighbors and then returns to the previous level. Detected with
-     a rolling Hampel filter (local median + MAD) and fixed by linear
-     interpolation from the nearest good cycles.
-  2. JUMP / STEP       — a persistent baseline shift that does NOT revert
-     (e.g. left over from a merge-file boundary). Detected as an abrupt
-     single-cycle change in the series that is confirmed by the following
-     cycles staying at the new level, and fixed by subtracting the shift from
-     every cycle after it — this preserves the real shape/trend of the data,
-     it just removes the artificial step.
+OUTLIER / SPIKE  — a single (or few) cycle whose peak value is way off from
+its neighbors and then returns to the previous level. Detected with a
+rolling Hampel filter (local median + MAD) and fixed by linear interpolation
+from the nearest good cycles.
 
 Genuine gradual trends (e.g. progressive residual displacement growing over
-thousands of cycles) are NOT touched — both detectors only fire on abrupt,
-single-cycle-scale changes relative to the channel's own local noise level.
+thousands of cycles) and persistent baseline shifts/jumps are NOT touched —
+the detector only fires on abrupt, single-cycle-scale changes that revert,
+relative to the channel's own local noise level.
 
 "cycle" and "time_s" (and any "<channel>_t" companion columns from
 --with-times) are carried through unchanged.
@@ -35,9 +29,6 @@ import pandas as pd
 # ── Configuration ─────────────────────────────────────────────────────────────
 SPIKE_WINDOW  = 11    # cycles, rolling window (odd) for the Hampel spike filter
 SPIKE_K       = 6.0   # flag a cycle as a spike if it's this many MADs from the local median
-JUMP_K        = 6.0   # flag a cycle-to-cycle step this many MADs above typical step size
-JUMP_CONFIRM  = 5      # cycles after a candidate jump checked to confirm it doesn't revert
-JUMP_CONFIRM_FRAC = 0.5  # the confirmed shift must retain at least this fraction of the jump
 
 
 def robust_mad(a):
@@ -79,40 +70,10 @@ def despike(x, window=SPIKE_WINDOW, k=SPIKE_K):
     return x, spikes
 
 
-def fix_jumps(x, k=JUMP_K, confirm=JUMP_CONFIRM, confirm_frac=JUMP_CONFIRM_FRAC):
-    """Detect persistent single-cycle level shifts (not reverted by the
-    following `confirm` cycles) and remove them by subtracting the shift
-    from every value after the jump. Returns (cleaned_x, jump_events) where
-    jump_events is a list of (cycle_index, shift_amount)."""
-    x = x.copy()
-    n = len(x)
-    jumps = []
-    # a single global noise estimate over the whole (already despiked) series —
-    # a small local window can land on a quiet stretch and underestimate
-    # noise, causing false positives on ordinary trend/slope changes
-    mad_d = robust_mad(np.diff(x))
-    if mad_d < 1e-12:
-        return x, jumps
-    i = 0
-    while i < n - 1:
-        step = x[i + 1] - x[i]
-        if abs(step) > k * mad_d:
-            after = x[i + 1: i + 1 + confirm]
-            after = after[~np.isnan(after)]
-            if len(after) >= 2 and abs(np.median(after) - x[i]) > confirm_frac * abs(step):
-                shift = np.median(after) - x[i]
-                x[i + 1:] -= shift
-                jumps.append((i + 1, shift))
-                mad_d = robust_mad(np.diff(x))  # refresh after correcting
-        i += 1
-    return x, jumps
-
-
 def clean_channel(x):
     x = np.asarray(x, dtype=float)
     x, spikes = despike(x)
-    x, jumps = fix_jumps(x)
-    return x, spikes, jumps
+    return x, spikes
 
 
 def clean_file(path, out_dir):
@@ -122,22 +83,17 @@ def clean_file(path, out_dir):
                     if c not in skip_cols and not c.endswith("_t")]
 
     print(f"\n{os.path.basename(path)}: {len(df)} cycles, {len(channel_cols)} channel(s)")
-    total_spikes = total_jumps = 0
+    total_spikes = 0
     for c in channel_cols:
-        cleaned, spikes, jumps = clean_channel(df[c].to_numpy())
+        cleaned, spikes = clean_channel(df[c].to_numpy())
         df[c] = cleaned
         if spikes:
             print(f"  {c:30s} {len(spikes)} spike(s) at cycles "
                   f"{[df['cycle'].iloc[i] for i in spikes]}")
-        if jumps:
-            detail = ", ".join(f"cycle {df['cycle'].iloc[i]}: {shift:+.5f}"
-                                for i, shift in jumps)
-            print(f"  {c:30s} {len(jumps)} jump(s) removed — {detail}")
         total_spikes += len(spikes)
-        total_jumps += len(jumps)
 
-    if total_spikes == 0 and total_jumps == 0:
-        print("  No spikes or jumps detected.")
+    if total_spikes == 0:
+        print("  No spikes detected.")
 
     stem = os.path.splitext(os.path.basename(path))[0]
     out_path = os.path.join(out_dir, f"{stem}_cleaned.txt")

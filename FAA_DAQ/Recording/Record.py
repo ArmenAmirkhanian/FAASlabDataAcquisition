@@ -36,7 +36,7 @@ HW_RATE          = 800         # Requested clock rate for both tasks. Real hardw
                                # measured values.
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-RECORD_SECONDS   = 30000       # Steady-state recording duration (10 hour) before ramp-down
+RECORD_SECONDS   = 15000       # Steady-state recording duration (5 hour) before ramp-down
 RAMPDOWN_SECONDS = 10         # Final ramp-down window recorded before auto-stop
 RECORD_SAMPLES   = RECORD_SECONDS * SAMPLE_RATE      # Phase B sample count that triggers the ramp-down prompt
 RAMPDOWN_SAMPLES = RAMPDOWN_SECONDS * SAMPLE_RATE    # Additional Phase B samples recorded after the prompt
@@ -484,6 +484,10 @@ def run_acquisition():
             else:
                 print("Plots discarded.")
 
+            # Close the figure ourselves so it doesn't linger for the interpreter
+            # to tear down later, which trips a benign but noisy matplotlib/Tk
+            # TclError on some Python versions.
+            plt.close(fig)
             root.destroy()
 
 # ─── RUN ──────────────────────────────────────────────────────
