@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Per-machine state (last folder used in file dialogs)
+FAA_DAQ/Processing/.last_dir.json
+
 # C extensions
 *.so
 

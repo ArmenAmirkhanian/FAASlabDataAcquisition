@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from _dialog_utils import get_last_dir, set_last_dir
 
 WINDOW_S  = 15.0   # seconds visible in the plot window at once
 MARKER_MS = 3.5
@@ -26,7 +27,7 @@ root.withdraw()
 
 in_path = filedialog.askopenfilename(
     title="Select data file to view",
-    initialdir=os.path.dirname(os.path.abspath(__file__)),
+    initialdir=get_last_dir(),
     filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
 )
 
@@ -36,6 +37,7 @@ if not in_path:
     raise SystemExit(0)
 
 root.destroy()
+set_last_dir(in_path)
 
 # ── Load ──────────────────────────────────────────────────────────────────────
 df = pd.read_csv(in_path, sep="\t")  # for python txt files

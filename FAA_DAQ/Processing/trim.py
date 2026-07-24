@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from _dialog_utils import get_last_dir, set_last_dir
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 SAMPLE_RATE  = 16
@@ -254,7 +255,7 @@ def select_time_markers(time_arr, data_arr, cols_list):
       • File end            (green  | )  — optional
     Returns (t_cs_voltage, t_cs_strain, t_file_end).
     """
-    WINDOW_S = 35.0
+    WINDOW_S = 20.0
 
     colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(cols_list))]
     vis    = [c.startswith("DCDT_") for c in cols_list]
@@ -449,11 +450,10 @@ root = tk.Tk()
 root.withdraw()
 
 in_path = filedialog.askopenfilename(
-    title="Select raw data file to trim",
-    initialdir=os.path.dirname(os.path.abspath(__file__)),
-    filetypes=[("Raw data files", "data_raw_*.txt"),
-               ("Text files",     "*.txt"),
-               ("All files",      "*.*")]
+    title="Select data file to trim",
+    initialdir=get_last_dir(),
+    filetypes=[("Text files", "*.txt"),
+               ("All files",  "*.*")]
 )
 
 if not in_path:
@@ -462,7 +462,7 @@ if not in_path:
     raise SystemExit(0)
 
 root.destroy()
-
+set_last_dir(in_path)
 default_name = os.path.splitext(os.path.basename(in_path))[0] + "_trimmed.txt"
 print(f"Input : {in_path}")
 
@@ -693,6 +693,8 @@ save_root.destroy()
 if not out_path:
     print("\n  Save cancelled — no file written.")
     raise SystemExit(0)
+
+set_last_dir(out_path)
 
 # ── Write output ──────────────────────────────────────────────────────────────
 with open(out_path, "w") as f:

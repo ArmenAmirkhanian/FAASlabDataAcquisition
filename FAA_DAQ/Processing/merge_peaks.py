@@ -1,10 +1,15 @@
 """
 merge_peaks.py — Straight concatenation of Peaks.py output files, no
-trimming, no interactive markers, no continuity offset matching.
+interactive markers, no continuity offset matching.
 
 Select two or more peak files of the SAME kind (all _upper_peaks.txt, or all
 _lower_peaks.txt, or all _peak_diff.txt) and they are stacked end-to-end in
-the order selected. Only two columns are touched:
+the order selected. Before stacking, the first RAMP_SECONDS of each file
+(cycles whose time_s falls in that window) are dropped — every file has its
+own ramp/pre-load period, so this is applied per file, not just once at the
+start of the merge.
+
+Only two columns are touched:
   "cycle"   renumbered 1..N across the merge
   "time_s"  kept continuously increasing (each file's own time_s stream is
             shifted to start right where the previous file's left off, using
@@ -21,6 +26,8 @@ import re
 import sys
 import numpy as np
 import pandas as pd
+
+RAMP_SECONDS = 5.0   # skip this much at the start of EVERY file (pre-load / ramp)
 
 
 def natural_key(path):
@@ -53,7 +60,12 @@ def main():
     for p in paths:
         df = pd.read_csv(p, sep="\t")
         if "time_s" in df.columns:
-            df = df.copy()
+            n_before = len(df)
+            df = df[df["time_s"] >= df["time_s"].iloc[0] + RAMP_SECONDS].reset_index(drop=True)
+            print(f"  {os.path.basename(p)}: dropped {n_before - len(df)} ramp cycle(s) "
+                  f"(< {RAMP_SECONDS:g}s), {len(df)} remain")
+            if df.empty:
+                continue
             dt = np.median(np.diff(df["time_s"].to_numpy(float))) if len(df) > 1 else 1.0
             df["time_s"] = df["time_s"] - df["time_s"].iloc[0] + t_offset
             t_offset = df["time_s"].iloc[-1] + dt
