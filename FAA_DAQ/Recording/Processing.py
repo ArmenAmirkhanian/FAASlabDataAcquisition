@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 # ─── CONFIGURATION (must match DataProcessing.py) ──────────────
-RAMP_SAMPLES = 160        # Rows used to lock the tare/baseline (10s ramp/dwell @ 16Hz)
+RAMP_SAMPLES = 80        # Rows used to lock the tare/baseline (10s ramp/dwell @ 16Hz)
 KPA_TO_PSI   = 0.145038   # kPa → psi conversion
 
 # Per-channel V → inches scale (0 V = 0 in, 10 V = full stroke)

@@ -485,10 +485,8 @@ print(f"  Sample rate  : {1/dt:.2f} Hz")
 print(f"{'─'*50}")
 
 all_cols     = [c for c in df.columns if c != "time_s"]
-voltage_cols = [c for c in all_cols if c.startswith("DCDT_")
-                                    or "pressure" in c.lower()
-                                    or c.startswith("volt_ch")]
 strain_cols  = [c for c in all_cols if c.startswith("SG_")]
+voltage_cols = [c for c in all_cols if c not in strain_cols]
 
 print(f"\n  Voltage module columns ({len(voltage_cols)}): DCDT + Pressure/Voltage")
 print(f"  Strain module columns  ({len(strain_cols)}):  Strain gauges")

@@ -28,7 +28,7 @@ DISP_SCALE = [
     1.969 / 10.0,   # DCDT_Left_Slab_B3
     3.937 / 10.0,   # DCDT_Left_Slab_C1
     3.937 / 10.0,   # DCDT_Left_Slab_C2
-    3.937 / 10.0,   # DCDT_Left_Slab_C3
+    1.969 / 10.0,   # DCDT_Left_Slab_C3
     0.9843 / 10.0,  # DCDT_Beam_B2_Top
 ]
 

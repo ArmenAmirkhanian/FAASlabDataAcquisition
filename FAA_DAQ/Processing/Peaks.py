@@ -3,8 +3,9 @@
 extract_peaks.py — Per-cycle upper/lower peak extraction for cyclic-loading
 DAQ files (16 Hz sampling, ~1 Hz loading).
 
-Opens a file picker (or takes the file as a command-line argument), segments
-the loading cycles, and for EVERY channel finds the upper and lower peak of
+Opens a file picker (multi-select, or takes one or more files as
+command-line arguments), and for EACH file independently: segments the
+loading cycles, and for EVERY channel finds the upper and lower peak of
 EVERY cycle. Because the strain-gauge and voltage/DCDT tasks are not exactly
 in phase, each channel gets its own phase-aligned window per cycle: the
 channel's lag relative to the reference channel is measured once by circular
@@ -12,7 +13,8 @@ cross-correlation, and every cycle window is shifted by that lag before the
 max/min are picked. Channels with inverted polarity or half-cycle offsets are
 handled the same way.
 
-OUTPUT — three tab-separated .txt files next to the input (or --outdir):
+OUTPUT — for EACH input file, three tab-separated .txt files next to it (or
+--outdir), named from that file's own stem:
     <name>_upper_peaks.txt   time_s | cycle | one column per channel (upper)
     <name>_lower_peaks.txt   time_s | cycle | one column per channel (lower)
     <name>_peak_diff.txt     time_s | cycle | one column per channel (upper-lower)
@@ -21,12 +23,17 @@ cycle number (1, 2, 3, ...). Use --with-times to add a <channel>_t column
 after each value column in the upper/lower files, giving the exact time_s at
 which that channel's peak was picked.
 
+When multiple files are selected/given, each one is processed on its own —
+its own cycle segmentation, its own phase lags, its own three output files —
+nothing is merged or shared across files.
+
 REQUIREMENTS: numpy, pandas (tkinter ships with Python). No scipy, no
 matplotlib needed.
 
 USAGE
-    python extract_peaks.py                     -> file picker
-    python extract_peaks.py input.txt           -> run on given file
+    python extract_peaks.py                                  -> file picker (multi-select)
+    python extract_peaks.py input.txt                         -> run on one file
+    python extract_peaks.py input1.txt input2.txt input3.txt  -> run on each, independently
     python extract_peaks.py input.txt --with-times --outdir C:\\results
 """
 
@@ -164,41 +171,10 @@ def build_reference(df, cols):
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("input", nargs="?", default=None,
-                    help="input file; if omitted a file browser opens")
-    ap.add_argument("--outdir", default=None,
-                    help="output folder (default: same folder as the input)")
-    ap.add_argument("--with-times", action="store_true",
-                    help="add a <channel>_t column after each value column in "
-                         "the upper/lower files (exact pick time per channel)")
-    args = ap.parse_args()
-
-    last_dir_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                  ".last_dir.txt")
-
-    in_path = args.input
-    if in_path is None:
-        import tkinter as tk
-        from tkinter import filedialog
-        start_dir = os.path.dirname(os.path.abspath(__file__))
-        if os.path.isfile(last_dir_file):
-            saved = open(last_dir_file).read().strip()
-            if os.path.isdir(saved):
-                start_dir = saved
-        root = tk.Tk()
-        root.withdraw()
-        in_path = filedialog.askopenfilename(
-            title="Select cyclic-loading data file",
-            initialdir=start_dir,
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
-        root.destroy()
-        if not in_path:
-            sys.exit("No file selected.")
-        with open(last_dir_file, "w") as fh:
-            fh.write(os.path.dirname(os.path.abspath(in_path)))
-
+def process_file(in_path, outdir, with_times):
+    """Run the full peak-extraction pipeline on a single input file and
+    write its three output files. Independent of any other file processed
+    in the same run — its own cycle segmentation, its own phase lags."""
     df = pd.read_csv(in_path, sep="\t")
     if "time_s" not in df.columns:
         sys.exit("input has no time_s column")
@@ -238,25 +214,14 @@ def main():
                 d[c + "_t"] = times[c]
         return pd.DataFrame(d)
 
-    up_df = make_table(upper, t_up, args.with_times)
-    lo_df = make_table(lower, t_lo, args.with_times)
+    up_df = make_table(upper, t_up, with_times)
+    lo_df = make_table(lower, t_lo, with_times)
     diff = {c: upper[c] - lower[c] for c in cols}
     df_df = make_table(diff, None, False)
 
-    outdir = args.outdir
-    if outdir is None:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        outdir = filedialog.askdirectory(
-            title="Select folder to save peak files",
-            initialdir=os.path.dirname(os.path.abspath(in_path)))
-        root.destroy()
-        if not outdir:
-            sys.exit("No output folder selected.")
-
-    os.makedirs(outdir, exist_ok=True)
+    file_outdir = outdir if outdir is not None else os.path.dirname(os.path.abspath(in_path))
+    os.makedirs(file_outdir, exist_ok=True)
+    outdir = file_outdir
     stem = os.path.splitext(os.path.basename(in_path))[0]
     paths = {}
     for tag, tab in [("upper_peaks", up_df), ("lower_peaks", lo_df),
@@ -273,6 +238,50 @@ def main():
           f"mean lower {np.nanmean(lower[rc]):.6g}, "
           f"mean range {np.nanmean(diff[rc]):.6g}")
     print("Done.")
+    return paths
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("inputs", nargs="*", default=[],
+                    help="one or more input files; if omitted a file browser opens (multi-select)")
+    ap.add_argument("--outdir", default=None,
+                    help="output folder for ALL files (default: each file's own folder)")
+    ap.add_argument("--with-times", action="store_true",
+                    help="add a <channel>_t column after each value column in "
+                         "the upper/lower files (exact pick time per channel)")
+    args = ap.parse_args()
+
+    last_dir_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  ".last_dir.txt")
+
+    in_paths = list(args.inputs)
+    if not in_paths:
+        import tkinter as tk
+        from tkinter import filedialog
+        start_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.isfile(last_dir_file):
+            saved = open(last_dir_file).read().strip()
+            if os.path.isdir(saved):
+                start_dir = saved
+        root = tk.Tk()
+        root.withdraw()
+        in_paths = list(filedialog.askopenfilenames(
+            title="Select cyclic-loading data file(s)",
+            initialdir=start_dir,
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]))
+        root.destroy()
+        if not in_paths:
+            sys.exit("No file selected.")
+        with open(last_dir_file, "w") as fh:
+            fh.write(os.path.dirname(os.path.abspath(in_paths[-1])))
+
+    print(f"Selected {len(in_paths)} file(s); each is processed independently:")
+    for p in in_paths:
+        print(f"  {os.path.basename(p)}")
+
+    for in_path in in_paths:
+        process_file(in_path, args.outdir, args.with_times)
 
 
 if __name__ == "__main__":
