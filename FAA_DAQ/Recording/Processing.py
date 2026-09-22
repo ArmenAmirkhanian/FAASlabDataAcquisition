@@ -4,7 +4,7 @@
 # conversion formulas and taring logic that used to run live during acquisition.
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import numpy as np
 import pandas as pd
 
@@ -118,16 +118,15 @@ def process_raw_file(raw_path):
     return proc_df, cal_df
 
 
-def output_paths_for(raw_path):
-    """Derive processed/calibrated filenames from the raw file's own timestamp suffix."""
-    out_dir = os.path.dirname(raw_path)
+def output_paths_for(raw_path, out_dir, set_name):
+    """Derive processed/calibrated filenames from the set name and the raw file's own timestamp suffix."""
     base = os.path.basename(raw_path)
     if base.startswith("data_raw_") and base.endswith(".txt"):
         suffix = base[len("data_raw_"):-len(".txt")]
     else:
         suffix = os.path.splitext(base)[0]
-    proc_filename = os.path.join(out_dir, f"data_processed_{suffix}.txt")
-    cal_filename  = os.path.join(out_dir, f"data_calibrated_{suffix}.txt")
+    proc_filename = os.path.join(out_dir, f"data_processed_{set_name}_{suffix}.txt")
+    cal_filename  = os.path.join(out_dir, f"data_calibrated_{set_name}_{suffix}.txt")
     return proc_filename, cal_filename
 
 
@@ -144,6 +143,26 @@ def main():
         root.destroy()
         return
 
+    out_dir = filedialog.askdirectory(
+        title="Select folder to save output files",
+        initialdir=os.path.dirname(raw_path),
+    )
+    if not out_dir:
+        print("No output folder selected. Exiting.")
+        root.destroy()
+        return
+
+    set_name = simpledialog.askstring(
+        "Set Name",
+        "Enter a name for this set (e.g. set1, set2):",
+        parent=root,
+    )
+    if not set_name:
+        print("No set name entered. Exiting.")
+        root.destroy()
+        return
+    set_name = set_name.strip()
+
     try:
         proc_df, cal_df = process_raw_file(raw_path)
     except Exception as e:
@@ -151,7 +170,7 @@ def main():
         root.destroy()
         raise
 
-    proc_filename, cal_filename = output_paths_for(raw_path)
+    proc_filename, cal_filename = output_paths_for(raw_path, out_dir, set_name)
     proc_df.to_csv(proc_filename, sep="\t", index=False, float_format="%.6f")
     cal_df.to_csv(cal_filename,  sep="\t", index=False, float_format="%.6f")
 
