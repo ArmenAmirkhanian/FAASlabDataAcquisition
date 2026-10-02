@@ -20,6 +20,7 @@ from collections import deque
 VOLTAGE_MODULE  = "cDAQ2Mod1"  # Slot 1: NI-9205 (displacement + pressure)
 STRAIN_MODULE_A = "cDAQ2Mod2"  # Slot 2: NI-9235 (strain ai0–ai7, 8 channels)
 STRAIN_MODULE_B = "cDAQ2Mod3"  # Slot 3: NI-9235 (strain ai0–ai1, 2 channels)
+VOLTAGE_MODULE_B = "cDAQ2Mod4"  # Slot 4: NI-9205 (4 additional DCDT channels, ai0-ai3)
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
 HW_RATE          = 800         # Requested clock rate for both tasks. Real hardware testing
                                # confirmed the two tasks do NOT necessarily share a true
@@ -44,6 +45,7 @@ RAMPDOWN_SAMPLES = RAMPDOWN_SECONDS * SAMPLE_RATE    # Additional Phase B sample
 # ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
 # ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
 # ai11:                       1 in stroke  (10 V = 0.9843 in)
+# Mod4 ai0-ai3 (new):         2 in stroke  (10 V = 1.969 in), same as ai4/ai7
 DISP_SCALE = [
     3.937 / 10.0,   # ai0  DCDT_Right_Slab_A1
     3.937 / 10.0,   # ai1  DCDT_Right_Slab_A2
@@ -57,6 +59,10 @@ DISP_SCALE = [
     3.937 / 10.0,   # ai9  DCDT_Left_Slab_C2
     1.969 / 10.0,   # ai10 DCDT_Left_Slab_C3
     0.9843 / 10.0,  # ai11 DCDT_Beam_B2_Top
+    1.969 / 10.0,   # Mod4 ai0  DCDT_Right_B2_16in
+    1.969 / 10.0,   # Mod4 ai1  DCDT_Right_B2_32in
+    1.969 / 10.0,   # Mod4 ai2  DCDT_Left_B2_16in
+    1.969 / 10.0,   # Mod4 ai3  DCDT_Left_B2_32in
 ]
 KPA_TO_PSI       = 0.145038      # kPa → psi conversion
 
@@ -114,16 +120,17 @@ def run_acquisition():
                 nominal_gage_resistance=120.0
             )
 
-        # -- Displacement + Pressure channels combined in one task (NI-9205, Slot 1) --
-        # Indices 0-11  → displacement (ai0 to ai11)
-        # Indices 12-15 → pressure     (ai17 to ai20)
-        for ch in range(12):
-            voltage_task.ai_channels.add_ai_voltage_chan(
-                f"{VOLTAGE_MODULE}/ai{ch}",
-                terminal_config=TerminalConfiguration.RSE,
-                min_val=0,
-                max_val=10.0
-            )
+        # -- Displacement + Pressure channels combined in one task (NI-9205, Slots 1 & 4) --
+        # Indices 0-15  → displacement (Mod1 ai0-ai11, then Mod4 ai0-ai3)
+        # Indices 16-19 → pressure     (Mod1 ai17 to ai20)
+        for device, n_channels in [(VOLTAGE_MODULE, 12), (VOLTAGE_MODULE_B, 4)]:
+            for ch in range(n_channels):
+                voltage_task.ai_channels.add_ai_voltage_chan(
+                    f"{device}/ai{ch}",
+                    terminal_config=TerminalConfiguration.RSE,
+                    min_val=0,
+                    max_val=10.0
+                )
         for ch in [20, 21, 22, 23]:
             voltage_task.ai_channels.add_ai_voltage_chan(
                 f"{VOLTAGE_MODULE}/ai{ch}",
@@ -195,7 +202,7 @@ def run_acquisition():
 
         # Ramp tare accumulators
         ramp_strain    = [0.0] * 10
-        ramp_disp_in   = [0.0] * 12
+        ramp_disp_in   = [0.0] * 16
         ramp_press_kpa = [0.0] * 4
         ramp_collected = 0
 
@@ -218,7 +225,9 @@ def run_acquisition():
             "DCDT_Right_Slab_B1", "DCDT_Right_Slab_B3",
             "DCDT_Left_Slab_B1",  "DCDT_Left_Slab_B2_Bot", "DCDT_Left_Slab_B3",
             "DCDT_Left_Slab_C1",  "DCDT_Left_Slab_C2", "DCDT_Left_Slab_C3",
-            "DCDT_Beam_B2_Top"
+            "DCDT_Beam_B2_Top",
+            "DCDT_Right_B2_16in", "DCDT_Right_B2_32in",
+            "DCDT_Left_B2_16in",  "DCDT_Left_B2_32in"
         ]
 
         raw_header = (
@@ -238,14 +247,14 @@ def run_acquisition():
         PLOT_WINDOW = 60 * SAMPLE_RATE     # 960 points at 16 Hz
         t_data      = deque(maxlen=PLOT_WINDOW)
         strain_plot = [deque(maxlen=PLOT_WINDOW) for _ in range(10)]
-        disp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(12)]
+        disp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(16)]
         press_plot  = [deque(maxlen=PLOT_WINDOW) for _ in range(4)]
         b2bot_plot  = deque(maxlen=PLOT_WINDOW)
 
         # Full dataset retained in memory for end-of-test plot saves
         t_full      = []
         strain_full = [[] for _ in range(10)]
-        disp_full   = [[] for _ in range(12)]
+        disp_full   = [[] for _ in range(16)]
         press_full  = [[] for _ in range(4)]
         b2bot_full  = []
 
@@ -273,8 +282,12 @@ def run_acquisition():
             '#17becf',  # 9  Left_Slab_C2   - teal
             '#f0027f',  # 10 Left_Slab_C3   - magenta
             '#000000',  # 11 Beam_B2_Top    - black
+            '#aec7e8',  # 12 Right_B2_16in  - light blue
+            '#ffbb78',  # 13 Right_B2_32in  - light orange
+            '#98df8a',  # 14 Left_B2_16in   - light green
+            '#ff9896',  # 15 Left_B2_32in   - light red
         ]
-        disp_lines = [ax2.plot([], [], label=disp_names[i], color=disp_colors[i])[0] for i in range(12)]
+        disp_lines = [ax2.plot([], [], label=disp_names[i], color=disp_colors[i])[0] for i in range(16)]
         ax2.legend(fontsize=6, loc="upper left")
 
         # Plot 3: Time vs Pressure (processed, psi)
@@ -327,14 +340,14 @@ def run_acquisition():
                 # Average each task's own sample count → 1 output value per channel at
                 # effective 16 Hz
                 strain_raw = [sum(strain_data[i])  / n_strain for i in range(10)]
-                disp_raw   = [sum(voltage_data[i]) / n_voltage for i in range(12)]
-                v17 = sum(voltage_data[12]) / n_voltage
-                v18 = sum(voltage_data[13]) / n_voltage
-                v19 = sum(voltage_data[14]) / n_voltage
-                v20 = sum(voltage_data[15]) / n_voltage
+                disp_raw   = [sum(voltage_data[i]) / n_voltage for i in range(16)]
+                v17 = sum(voltage_data[16]) / n_voltage
+                v18 = sum(voltage_data[17]) / n_voltage
+                v19 = sum(voltage_data[18]) / n_voltage
+                v20 = sum(voltage_data[19]) / n_voltage
 
                 # ── Step 2: Convert raw to physical units ─────────
-                disp_in   = [disp_raw[i] * DISP_SCALE[i] for i in range(12)]
+                disp_in   = [disp_raw[i] * DISP_SCALE[i] for i in range(16)]
                 # Pressure formulas expect millivolts — convert from volts first
                 press_kpa = [process_soil_plate_pressure(v17 * 1000),
                              process_agg_plate_pressure(v18 * 1000),
@@ -345,7 +358,7 @@ def run_acquisition():
                 if ramp_collected < RAMP_SAMPLES:
                     for i in range(10):
                         ramp_strain[i]    += strain_raw[i]
-                    for i in range(12):
+                    for i in range(16):
                         ramp_disp_in[i]   += disp_in[i]
                     ramp_press_kpa[0] += press_kpa[0]
                     ramp_press_kpa[1] += press_kpa[1]
@@ -380,7 +393,7 @@ def run_acquisition():
                     raise KeyboardInterrupt
 
                 strain_tared    = [strain_raw[i] - baseline_strain[i]    for i in range(10)]
-                disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(12)]
+                disp_tared      = [disp_in[i]    - baseline_disp_in[i]   for i in range(16)]
                 # Plate cells (0,1) are tared to the pre-load baseline — they measure
                 # load-induced contact pressure, which should read ~0 before loading.
                 # Pore water pressure sensors (2,3) are left untared/absolute — they
@@ -411,7 +424,7 @@ def run_acquisition():
                 for i in range(10):
                     strain_plot[i].append(strain_tared[i])
                     strain_full[i].append(strain_tared[i])
-                for i in range(12):
+                for i in range(16):
                     disp_plot[i].append(disp_tared[i])
                     disp_full[i].append(disp_tared[i])
                 for i in range(4):
