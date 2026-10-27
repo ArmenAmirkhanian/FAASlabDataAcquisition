@@ -2,11 +2,15 @@ import gc
 import ctypes
 import nidaqmx
 from nidaqmx.constants import (AcquisitionType,
+                                ADCTimingMode,
                                 BridgeConfiguration,
+                                CJCSource,
                                 ExcitationSource,
                                 OverwriteMode,
                                 StrainGageBridgeType,
-                                TerminalConfiguration)
+                                TemperatureUnits,
+                                TerminalConfiguration,
+                                ThermocoupleType)
 from datetime import datetime
 import time
 import numpy as np
@@ -17,10 +21,15 @@ import os
 from collections import deque
 
 # ─── CONFIGURATION ────────────────────────────────────────────
-VOLTAGE_MODULE  = "cDAQ2Mod1"  # Slot 1: NI-9205 (displacement + pressure)
+VOLTAGE_MODULE  = "cDAQ2Mod1"  # Slot 1: NI-9205 (displacement ai0–ai15 + pressure ai20–ai23)
 STRAIN_MODULE_A = "cDAQ2Mod2"  # Slot 2: NI-9235 (strain ai0–ai7, 8 channels)
 STRAIN_MODULE_B = "cDAQ2Mod3"  # Slot 3: NI-9235 (strain ai0–ai1, 2 channels)
-VOLTAGE_MODULE_B = "cDAQ2Mod4"  # Slot 4: NI-9205 (4 additional DCDT channels, ai0-ai3)
+THERMO_MODULE   = "cDAQ2Mod4"  # Slot 4: NI-9212 (thermocouples ai0–ai3)
+THERMO_TYPE     = ThermocoupleType.K   # K-type, confirmed in MAX Test Panels
+THERMO_RATE     = 16          # Thermocouple task clock (Hz) — one reading per 16 Hz output row.
+                              # The NI-9212 can't run at HW_RATE, so it gets its own task, put in
+                              # High Speed ADC mode (its default high-resolution mode only reaches
+                              # ~2 Hz). The actual locked rate is read back at startup like the others.
 SAMPLE_RATE      = 16         # Effective output rate (Hz) — written to file and plotted
 HW_RATE          = 800         # Requested clock rate for both tasks. Real hardware testing
                                # confirmed the two tasks do NOT necessarily share a true
@@ -37,7 +46,8 @@ HW_RATE          = 800         # Requested clock rate for both tasks. Real hardw
                                # measured values.
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-RECORD_SECONDS   = 864000       # Steady-state recording duration (5 hour) before ramp-down
+RECORD_HOURS     = 10
+RECORD_SECONDS   = RECORD_HOURS * 3600   # Steady-state recording duration (10 hours) before ramp-down
 RAMPDOWN_SECONDS = 10         # Final ramp-down window recorded before auto-stop
 RECORD_SAMPLES   = RECORD_SECONDS * SAMPLE_RATE      # Phase B sample count that triggers the ramp-down prompt
 RAMPDOWN_SAMPLES = RAMPDOWN_SECONDS * SAMPLE_RATE    # Additional Phase B samples recorded after the prompt
@@ -45,7 +55,7 @@ RAMPDOWN_SAMPLES = RAMPDOWN_SECONDS * SAMPLE_RATE    # Additional Phase B sample
 # ai0-ai3, ai5-ai6, ai8-ai10: 3.937 in stroke
 # ai4, ai7:                   2 in stroke  (10 V = 1.969 in)
 # ai11:                       1 in stroke  (10 V = 0.9843 in)
-# Mod4 ai0-ai3 (new):         2 in stroke  (10 V = 1.969 in), same as ai4/ai7
+# ai12-ai15 (new):            2 in stroke  (10 V = 1.969 in), same as ai4/ai7
 DISP_SCALE = [
     3.937 / 10.0,   # ai0  DCDT_Right_Slab_A1
     3.937 / 10.0,   # ai1  DCDT_Right_Slab_A2
@@ -59,10 +69,10 @@ DISP_SCALE = [
     3.937 / 10.0,   # ai9  DCDT_Left_Slab_C2
     1.969 / 10.0,   # ai10 DCDT_Left_Slab_C3
     0.9843 / 10.0,  # ai11 DCDT_Beam_B2_Top
-    1.969 / 10.0,   # Mod4 ai0  DCDT_Right_B2_16in
-    1.969 / 10.0,   # Mod4 ai1  DCDT_Right_B2_32in
-    1.969 / 10.0,   # Mod4 ai2  DCDT_Left_B2_16in
-    1.969 / 10.0,   # Mod4 ai3  DCDT_Left_B2_32in
+    1.969 / 10.0,   # ai12 DCDT_Right_B2_16in
+    1.969 / 10.0,   # ai13 DCDT_Right_B2_32in
+    1.969 / 10.0,   # ai14 DCDT_Left_B2_16in
+    1.969 / 10.0,   # ai15 DCDT_Left_B2_32in
 ]
 KPA_TO_PSI       = 0.145038      # kPa → psi conversion
 
@@ -84,8 +94,12 @@ SMOOTH_WINDOW = 11   # increase for smoother curves
 def smooth(y):
     if len(y) < SMOOTH_WINDOW:
         return y
+    # Pad each end with copies of the end value (not zeros) so the moving
+    # average doesn't drag the first/last points toward 0.
+    half = SMOOTH_WINDOW // 2
+    padded = np.pad(np.asarray(y, dtype=float), half, mode='edge')
     kernel = np.ones(SMOOTH_WINDOW) / SMOOTH_WINDOW
-    return np.convolve(y, kernel, mode='same')
+    return np.convolve(padded, kernel, mode='valid')
 
 # ─── MAIN ACQUISITION LOOP ────────────────────────────────────
 def run_acquisition():
@@ -96,7 +110,8 @@ def run_acquisition():
     ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
 
     with nidaqmx.Task() as strain_task, \
-         nidaqmx.Task() as voltage_task:
+         nidaqmx.Task() as voltage_task, \
+         nidaqmx.Task() as thermo_task:
 
         # -- Strain channels: ai0-ai7 on Mod2, ai0-ai1 on Mod3 --
         for ch in range(8):
@@ -120,17 +135,16 @@ def run_acquisition():
                 nominal_gage_resistance=120.0
             )
 
-        # -- Displacement + Pressure channels combined in one task (NI-9205, Slots 1 & 4) --
-        # Indices 0-15  → displacement (Mod1 ai0-ai11, then Mod4 ai0-ai3)
-        # Indices 16-19 → pressure     (Mod1 ai17 to ai20)
-        for device, n_channels in [(VOLTAGE_MODULE, 12), (VOLTAGE_MODULE_B, 4)]:
-            for ch in range(n_channels):
-                voltage_task.ai_channels.add_ai_voltage_chan(
-                    f"{device}/ai{ch}",
-                    terminal_config=TerminalConfiguration.RSE,
-                    min_val=0,
-                    max_val=10.0
-                )
+        # -- Displacement + Pressure channels combined in one task (NI-9205, Slot 1) --
+        # Indices 0-15  → displacement (Mod1 ai0-ai15)
+        # Indices 16-19 → pressure     (Mod1 ai20-ai23)
+        for ch in range(16):
+            voltage_task.ai_channels.add_ai_voltage_chan(
+                f"{VOLTAGE_MODULE}/ai{ch}",
+                terminal_config=TerminalConfiguration.RSE,
+                min_val=0,
+                max_val=10.0
+            )
         for ch in [20, 21, 22, 23]:
             voltage_task.ai_channels.add_ai_voltage_chan(
                 f"{VOLTAGE_MODULE}/ai{ch}",
@@ -138,6 +152,19 @@ def run_acquisition():
                 min_val=0,
                 max_val=10.0
             )
+
+        # -- Thermocouples (NI-9212, Slot 4): ai0 soil, ai1 aggregate, ai2 concrete slab,
+        #    ai3 reaction steel beam. Built-in cold-junction compensation, read in °F.
+        for ch in range(4):
+            thermo_chan = thermo_task.ai_channels.add_ai_thrmcpl_chan(
+                f"{THERMO_MODULE}/ai{ch}",
+                min_val=0.0,
+                max_val=212.0,
+                units=TemperatureUnits.DEG_F,
+                thermocouple_type=THERMO_TYPE,
+                cjc_source=CJCSource.BUILT_IN
+            )
+            thermo_chan.ai_adc_timing_mode = ADCTimingMode.HIGH_SPEED
 
         # -- Set sample rates (both tasks share the Armen chassis 100 MHz timebase) --
         # CONTINUOUS mode: samps_per_chan is just the circular buffer size — it only
@@ -150,6 +177,8 @@ def run_acquisition():
             HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * DAQ_BUFFER_SECONDS)
         voltage_task.timing.cfg_samp_clk_timing(
             HW_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=HW_RATE * DAQ_BUFFER_SECONDS)
+        thermo_task.timing.cfg_samp_clk_timing(
+            THERMO_RATE, sample_mode=AcquisitionType.CONTINUOUS, samps_per_chan=THERMO_RATE * DAQ_BUFFER_SECONDS)
 
         # Read back each task's ACTUAL locked-in rate — hardware may coerce the
         # requested rate to its nearest achievable value (confirmed: strain and
@@ -158,8 +187,13 @@ def run_acquisition():
         # so downsampling is always correct even if the achievable rate changes.
         actual_strain_rate  = strain_task.timing.samp_clk_rate
         actual_voltage_rate = voltage_task.timing.samp_clk_rate
+        actual_thermo_rate  = thermo_task.timing.samp_clk_rate
         print(f"Strain task clock rate:  {actual_strain_rate} Hz (requested {HW_RATE} Hz)")
         print(f"Voltage task clock rate: {actual_voltage_rate} Hz (requested {HW_RATE} Hz)")
+        print(f"Thermo task clock rate:  {actual_thermo_rate} Hz (requested {THERMO_RATE} Hz)")
+        if actual_thermo_rate < SAMPLE_RATE:
+            print(f"WARNING: thermocouple rate is below {SAMPLE_RATE} Hz — some output rows "
+                  "will repeat the previous temperature reading.")
         # Wide tolerance — routine ODR quantization can land tens of Hz from the
         # request, that's expected and handled. This only flags a genuinely broken
         # configuration (wrong device, wrong channel count, etc.).
@@ -173,6 +207,7 @@ def run_acquisition():
         # falls behind and the circular buffer fills.
         strain_task.in_stream.overwrite  = OverwriteMode.DO_NOT_OVERWRITE_UNREAD_SAMPLES
         voltage_task.in_stream.overwrite = OverwriteMode.DO_NOT_OVERWRITE_UNREAD_SAMPLES
+        thermo_task.in_stream.overwrite  = OverwriteMode.DO_NOT_OVERWRITE_UNREAD_SAMPLES
 
         # ── 10s countdown — walk to MTS during this time ─────────
         print("Acquisition started. Walk to MTS now...")
@@ -199,6 +234,9 @@ def run_acquisition():
         strain_taken         = 0
         voltage_target_cum   = 0.0
         voltage_taken         = 0
+        thermo_target_cum    = 0.0
+        thermo_taken          = 0
+        temp_c = [float("nan")] * 4   # last temperature reading, held if a row gets no new sample
 
         # Ramp tare accumulators
         ramp_strain    = [0.0] * 10
@@ -230,17 +268,25 @@ def run_acquisition():
             "DCDT_Left_B2_16in",  "DCDT_Left_B2_32in"
         ]
 
+        temp_names = ["Temp_Soil_F", "Temp_Aggregate_F", "Temp_Concrete_Slab_F", "Temp_Steel_Beam_F"]
+
         raw_header = (
             ["time_s"] +
             disp_names +
             ["Soil_plate_volt_ch17", "Agg_plate_volt_ch18", "Soil_pore_water_volt_ch19", "Agg_pore_water_volt_ch20"] +
-            strain_names
+            strain_names +
+            temp_names
         )
         raw_file.write("\t".join(raw_header)   + "\n")
 
         # ── Live plot setup ───────────────────────────────────────
         plt.ion()
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8))
+        # Layout:  Strain       | Right slab disp | Pressure
+        #          Temperature  | Left slab disp  | Pressure vs disp
+        # Constrained layout re-spaces the panels on every redraw, so axis labels
+        # don't collide when tick labels widen as live data arrives.
+        fig, ((ax1, ax2, ax3), (ax5, ax6, ax4)) = plt.subplots(
+            2, 3, figsize=(20, 8), layout="constrained")
         fig.suptitle("Live DAQ Data")
 
         # Rolling window for live plots — last 1 minute of data
@@ -250,6 +296,7 @@ def run_acquisition():
         disp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(16)]
         press_plot  = [deque(maxlen=PLOT_WINDOW) for _ in range(4)]
         b2bot_plot  = deque(maxlen=PLOT_WINDOW)
+        temp_plot   = [deque(maxlen=PLOT_WINDOW) for _ in range(4)]
 
         # Full dataset retained in memory for end-of-test plot saves
         t_full      = []
@@ -257,6 +304,7 @@ def run_acquisition():
         disp_full   = [[] for _ in range(16)]
         press_full  = [[] for _ in range(4)]
         b2bot_full  = []
+        temp_full   = [[] for _ in range(4)]
 
         # Plot 1: Time vs Strain (tared)
         ax1.set_title("Strain (tared)")
@@ -265,10 +313,15 @@ def run_acquisition():
         strain_lines = [ax1.plot([], [], label=strain_names[i])[0] for i in range(10)]
         ax1.legend(fontsize=6, loc="upper left")
 
-        # Plot 2: Time vs Displacement (processed, in)
-        ax2.set_title("Displacement - Processed")
-        ax2.set_xlabel("Time (s)")
-        ax2.set_ylabel("Displacement (in)")
+        # Plots 2 & 6: Time vs Displacement (processed, in), split by slab.
+        # Indices into disp_names; DCDT_Beam_B2_Top (11) is grouped with the right slab.
+        RIGHT_DISP_IDX = [0, 1, 2, 3, 4, 11, 12, 13]       # loaded slab
+        LEFT_DISP_IDX  = [5, 6, 7, 8, 9, 10, 14, 15]       # unloaded slab
+        ax2.set_title("Right Slab (Loaded) Displacement")
+        ax6.set_title("Left Slab (Unloaded) Displacement")
+        for ax in [ax2, ax6]:
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Displacement (in)")
         disp_colors = [
             '#1f77b4',  # 0  Right_Slab_A1  - blue
             '#ff7f0e',  # 1  Right_Slab_A2  - orange
@@ -287,8 +340,10 @@ def run_acquisition():
             '#98df8a',  # 14 Left_B2_16in   - light green
             '#ff9896',  # 15 Left_B2_32in   - light red
         ]
-        disp_lines = [ax2.plot([], [], label=disp_names[i], color=disp_colors[i])[0] for i in range(16)]
+        disp_lines = [(ax2 if i in RIGHT_DISP_IDX else ax6).plot(
+                          [], [], label=disp_names[i], color=disp_colors[i])[0] for i in range(16)]
         ax2.legend(fontsize=6, loc="upper left")
+        ax6.legend(fontsize=6, loc="upper left")
 
         # Plot 3: Time vs Pressure (processed, psi)
         press_labels = ["Soil Plate", "Agg Plate", "Soil Pore Water", "Agg Pore Water"]
@@ -306,7 +361,14 @@ def run_acquisition():
         agg_plate_line,  = ax4.plot([], [], label="Agg Plate Pressure (psi)")
         ax4.legend(fontsize=7, loc="upper left")
 
-        plt.tight_layout()
+        # Plot 5: Time vs Temperature (°F, absolute — not tared)
+        temp_labels = ["Soil", "Aggregate", "Concrete Slab", "Steel Beam"]
+        ax5.set_title("Temperature")
+        ax5.set_xlabel("Time (s)")
+        ax5.set_ylabel("Temperature (°F)")
+        temp_lines = [ax5.plot([], [], label=temp_labels[i])[0] for i in range(4)]
+        ax5.legend(fontsize=7, loc="upper left")
+
         plt.show(block=False)
 
         # NOTE: real hardware testing confirmed the strain and voltage tasks do NOT
@@ -316,6 +378,7 @@ def run_acquisition():
         # its own live-measured rate.
         strain_task.start()
         voltage_task.start()
+        thermo_task.start()
 
         try:
             while True:
@@ -336,6 +399,15 @@ def run_acquisition():
                     number_of_samples_per_channel=n_strain)
                 voltage_data = voltage_task.read(
                     number_of_samples_per_channel=n_voltage)
+
+                # Thermocouples run on their own slower clock — same accumulator idea.
+                thermo_target_cum += actual_thermo_rate / SAMPLE_RATE
+                n_thermo = round(thermo_target_cum) - thermo_taken
+                if n_thermo > 0:
+                    thermo_taken += n_thermo
+                    thermo_data = thermo_task.read(
+                        number_of_samples_per_channel=n_thermo)
+                    temp_c = [sum(thermo_data[i]) / n_thermo for i in range(4)]
 
                 # Average each task's own sample count → 1 output value per channel at
                 # effective 16 Hz
@@ -372,7 +444,8 @@ def run_acquisition():
                     raw_row = [f"{t:.6f}"] + \
                               [f"{v:.6f}" for v in disp_raw] + \
                               [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
-                              [f"{v:.6f}" for v in strain_raw]
+                              [f"{v:.6f}" for v in strain_raw] + \
+                              [f"{v:.6f}" for v in temp_c]
                     raw_file.write("\t".join(raw_row) + "\n")
 
                     # Once ramp complete → lock baseline
@@ -416,7 +489,8 @@ def run_acquisition():
                 raw_row = [f"{t:.6f}"] + \
                           [f"{v:.6f}" for v in disp_raw] + \
                           [f"{v17:.6f}", f"{v18:.6f}", f"{v19:.6f}", f"{v20:.6f}"] + \
-                          [f"{v:.6f}" for v in strain_raw]
+                          [f"{v:.6f}" for v in strain_raw] + \
+                          [f"{v:.6f}" for v in temp_c]
                 raw_file.write("\t".join(raw_row) + "\n")
 
                 t_data.append(t)
@@ -432,6 +506,9 @@ def run_acquisition():
                     press_full[i].append(press_plot_psi[i])
                 b2bot_plot.append(disp_tared[6])
                 b2bot_full.append(disp_tared[6])
+                for i in range(4):
+                    temp_plot[i].append(temp_c[i])
+                    temp_full[i].append(temp_c[i])
 
                 raw_file.flush()
 
@@ -447,8 +524,10 @@ def run_acquisition():
                         line.set_data(t_data, smooth(press_plot[i]))
                     soil_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[0]))
                     agg_plate_line.set_data(smooth(b2bot_plot), smooth(press_plot[1]))
+                    for i, line in enumerate(temp_lines):
+                        line.set_data(t_data, smooth(temp_plot[i]))
 
-                    for ax in [ax1, ax2, ax3, ax4]:
+                    for ax in [ax1, ax2, ax3, ax4, ax5, ax6]:
                         ax.relim()
                         ax.autoscale_view()
                     plt.pause(0.001)
@@ -490,16 +569,20 @@ def run_acquisition():
                     line.set_data(t_full, smooth(press_full[i]))
                 soil_plate_line.set_data(smooth(b2bot_full), smooth(press_full[0]))
                 agg_plate_line.set_data(smooth(b2bot_full), smooth(press_full[1]))
-                for ax in [ax1, ax2, ax3, ax4]:
+                for i, line in enumerate(temp_lines):
+                    line.set_data(t_full, smooth(temp_full[i]))
+                for ax in [ax1, ax2, ax3, ax4, ax5, ax6]:
                     ax.relim()
                     ax.autoscale_view()
                 fig.canvas.draw()
 
                 plot_info = [
                     (ax1, "plot_strain"),
-                    (ax2, "plot_displacement"),
+                    (ax2, "plot_displacement_right"),
+                    (ax6, "plot_displacement_left"),
                     (ax3, "plot_pressure"),
                     (ax4, "plot_pressure_vs_disp"),
+                    (ax5, "plot_temperature"),
                 ]
                 for ax, name in plot_info:
                     extent = ax.get_tightbbox(fig.canvas.get_renderer()).transformed(

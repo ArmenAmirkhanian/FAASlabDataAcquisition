@@ -36,7 +36,8 @@ HW_RATE          = 800         # Requested clock rate for both tasks. Real hardw
                                # measured values.
 WALK_COUNTDOWN   = 15         # Seconds countdown before recording — time to walk to MTS
 RAMP_SAMPLES     = 160        # Samples during ramp (10s × 16Hz) — averaged for 1 kip baseline
-RECORD_SECONDS   = 864000       # Steady-state recording duration (5 hour) before ramp-down
+RECORD_HOURS     = 10
+RECORD_SECONDS   = RECORD_HOURS * 3600   # Steady-state recording duration (10 hours) before ramp-down
 RAMPDOWN_SECONDS = 10         # Final ramp-down window recorded before auto-stop
 RECORD_SAMPLES   = RECORD_SECONDS * SAMPLE_RATE      # Phase B sample count that triggers the ramp-down prompt
 RAMPDOWN_SAMPLES = RAMPDOWN_SECONDS * SAMPLE_RATE    # Additional Phase B samples recorded after the prompt
