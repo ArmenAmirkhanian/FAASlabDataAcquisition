@@ -368,6 +368,10 @@ def run_acquisition():
         ax5.set_ylabel("Temperature (°F)")
         temp_lines = [ax5.plot([], [], label=temp_labels[i])[0] for i in range(4)]
         ax5.legend(fontsize=7, loc="upper left")
+        # Fixed y-range so a faulty channel (e.g. open thermocouple reading ~4000 °F)
+        # can't stretch the axis. set_ylim turns off y-autoscaling for this axis only;
+        # the time axis still autoscales.
+        #ax5.set_ylim(0, 5000)
 
         plt.show(block=False)
 
